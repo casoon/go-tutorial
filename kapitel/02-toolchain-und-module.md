@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel kennst du die Werkzeuge, die mit Go ausgeliefert werden, kannst ein Modul anlegen, Abhängigkeiten verwalten und auf Schwachstellen prüfen – und du verstehst, was in `go.mod` und `go.sum` steht und warum Go Versionen anders auflöst als npm oder NuGet.
 
+> **upwatch in diesem Teil:** [go.mod](../go.mod), [go.sum](../go.sum) und das [Makefile](../Makefile)
+> **Voraussetzungen:** Teil 01
+
 ## Ein Befehl für alles
 
 In TypeScript-Projekten setzt du die Werkzeugkette aus Einzelteilen zusammen: `npm` oder `pnpm` für Pakete, `tsc` zum Übersetzen, ESLint, Prettier, Jest oder Vitest, dazu je eine Konfigurationsdatei. In .NET bündelt die `dotnet`-CLI das meiste davon; Go geht denselben Weg noch etwas konsequenter. Der Befehl `go` übersetzt, testet, formatiert, prüft, verwaltet Abhängigkeiten, zeigt Dokumentation an und lädt sogar neue Go-Versionen nach. Konfigurationsdateien für diese Werkzeuge gibt es nicht.
@@ -136,6 +139,34 @@ go doc ./internal/monitor.NewTarget
 
 Dokumentation ist in Go einfach ein Kommentar direkt über der Deklaration, der mit deren Namen beginnt. Es gibt kein `///` mit XML wie in C# und keine JSDoc-Tags. Im Browser findest du dieselben Texte für jedes öffentliche Modul auf pkg.go.dev.
 
+
+## Jetzt du: was `go vet` findet
+
+Lege außerhalb des Repositorys ein Wegwerf-Modul an und schreibe einen Fehler hinein, den der Compiler nicht bemerkt:
+
+```bash
+mkdir vetdemo && cd vetdemo
+go mod init example.com/vetdemo
+cat > main.go <<'GO'
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Printf("checked %d targets\n", "three")
+}
+GO
+go build && echo "build ok"
+go vet
+```
+
+```
+build ok
+main.go:6:22: fmt.Printf format %d has arg "three" of wrong type string
+```
+
+`go build` ist zufrieden, denn `Printf` nimmt beliebige Argumente. `go vet` kennt die Bedeutung der Platzhalter und meldet den Widerspruch mit Exit-Code 1. Ersetze `%d` durch `%s` und führe `go vet` erneut aus: Es bleibt still. Dieselbe Prüfung läuft übrigens automatisch, wenn du `go test` aufrufst.
+
 ## Abhängigkeiten: go get und go mod tidy
 
 Eine Abhängigkeit fügst du hinzu, indem du sie im Code importierst und dann `go mod tidy` ausführst, oder ausdrücklich mit `go get`:
@@ -157,9 +188,34 @@ go list -m -u all               # zeigen, wofür es Updates gibt
 go mod why -m golang.org/x/sys  # warum ist dieses Modul im Build?
 ```
 
-## go.mod im Detail
+Auf bekannte Schwachstellen prüfst du mit `govulncheck`, das du ohne Installation über `go run` startest:
 
-So sieht die `go.mod` von upwatch aus:
+```bash
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+```
+
+Anders als `npm audit` meldet govulncheck in erster Linie Schwachstellen in Funktionen, die dein Code tatsächlich aufruft, und zeigt den Aufrufpfad dorthin. Weil Go Abhängigkeiten nie von selbst aktualisiert (siehe Minimal Version Selection weiter unten), gehört der Befehl in den regelmäßigen Ablauf; einen echten Lauf gegen upwatch und was daraus folgt, zeigt Teil 13.
+
+## go.mod in fünf Zeilen
+
+Damit hast du alles, was du für die nächsten Kapitel brauchst. Die `go.mod` von upwatch, auf das Wesentliche gekürzt:
+
+```
+module github.com/casoon/go-tutorial  // module path: prefix of every import in this repo
+go 1.26.0                             // minimum Go version, also selects language semantics
+require modernc.org/sqlite v1.60.1    // direct dependency, a minimum version, not a range
+require ( … // indirect )             // what the dependencies need, maintained by go mod tidy
+toolchain …                           // optional: preferred Go version (not used by upwatch)
+```
+
+Daneben liegt `go.sum` mit Prüfsummen für jedes Modul. Beide Dateien gehören ins Repository, beide pflegt die Toolchain, und ein separates Lockfile wie `package-lock.json` gibt es nicht. Warum das genügt, erklärt der folgende Abschnitt.
+
+## Für später: Module im Detail
+
+Dieser Abschnitt erklärt, was unter der Haube passiert: wie Go Versionen auswählt, woher die Module kommen und wie sich die Toolchain selbst aktualisiert. Für die folgenden Kapitel brauchst du ihn nicht. Lies ihn, wenn du zum ersten Mal ein Update einspielst oder ein privates Modul einbinden willst.
+
+<details>
+<summary>Die vollständige go.mod von upwatch</summary>
 
 ```
 module github.com/casoon/go-tutorial
@@ -181,13 +237,9 @@ require (
 )
 ```
 
-**`module`** ist der Modulpfad. Jedes Paket im Repository wird relativ dazu importiert, etwa `github.com/casoon/go-tutorial/internal/monitor`.
+**`go 1.26.0`** legt auch fest, welche Sprachversion der Compiler verwendet. Ein Beispiel: Seit Go 1.22 bekommt jede Iteration einer `for`-Schleife eine eigene Schleifenvariable. Ein Modul mit `go 1.21` in der `go.mod` behält das alte Verhalten, auch wenn es mit Go 1.27 übersetzt wird. Go bricht so niemals still die Semantik älteren Codes.
 
-**`go 1.26.0`** ist die minimale Go-Version, die das Modul braucht. Sie legt auch fest, welche Sprachversion der Compiler verwendet. Ein Beispiel: Seit Go 1.22 bekommt jede Iteration einer `for`-Schleife eine eigene Schleifenvariable. Ein Modul mit `go 1.21` in der `go.mod` behält das alte Verhalten, auch wenn es mit Go 1.27 übersetzt wird. Go bricht so niemals still die Semantik älteren Codes.
-
-**`require`** listet die Abhängigkeiten mit Version. Der erste Block enthält die direkte Abhängigkeit – den SQLite-Treiber, den upwatch selbst importiert. Der zweite Block enthält Module mit dem Kommentar `// indirect`: Sie werden nicht von upwatch importiert, sondern von `modernc.org/sqlite`. Seit Go 1.17 stehen alle Module, die für den Build der eigenen Pakete gebraucht werden, explizit in `go.mod`. Das macht die Datei länger, aber die Toolchain muss nicht mehr den gesamten Abhängigkeitsgraph laden, um zu bauen.
-
-Warum `github.com/google/uuid` dabei ist, verrät `go mod why`:
+**`require`** mit `// indirect`: Diese Module importiert nicht upwatch, sondern `modernc.org/sqlite`. Seit Go 1.17 stehen alle Module, die für den Build der eigenen Pakete gebraucht werden, explizit in `go.mod`. Das macht die Datei länger, aber die Toolchain muss nicht mehr den gesamten Abhängigkeitsgraph laden, um zu bauen. Warum `github.com/google/uuid` dabei ist, verrät `go mod why`:
 
 ```bash
 go mod why github.com/google/uuid
@@ -205,7 +257,9 @@ Die Version `v0.0.0-20230129092748-24d4a6f8daec` ist eine **Pseudo-Version**: Da
 
 Module ab Version 2 tragen die Hauptversion im Pfad, etwa `github.com/jackc/pgx/v5`. Das ist die Import-Kompatibilitätsregel: Ein Importpfad muss über alle Versionen kompatibel bleiben; ein Breaking Change bekommt einen neuen Pfad. Dadurch können `v4` und `v5` derselben Bibliothek sogar gleichzeitig im Build vorkommen.
 
-## go.sum: Prüfsummen statt Lockfile
+</details>
+
+### go.sum: Prüfsummen statt Lockfile
 
 `go.sum` enthält für jedes Modul im Graph kryptografische Prüfsummen:
 
@@ -214,27 +268,21 @@ modernc.org/sqlite v1.60.1 h1:/blz53O951KWFOso4QQvEs/Fq6cDBKLtMVrYNSeJVKw=
 modernc.org/sqlite v1.60.1/go.mod h1:1dIoEagfDE72QytD5scH1lxARtaUgKgHC/NuApA27r0=
 ```
 
-Die erste Zeile ist der Hash des gesamten Modulinhalts, die zweite der Hash nur seiner `go.mod`. Beim Download prüft die Toolchain jedes Modul gegen diese Hashes. Hat jemand eine veröffentlichte Version nachträglich verändert, schlägt der Build fehl. `go.sum` gehört deshalb ins Repository.
+Die erste Zeile ist der Hash des gesamten Modulinhalts, die zweite der Hash nur seiner `go.mod`. Beim Download prüft die Toolchain jedes Modul gegen diese Hashes. Hat jemand eine veröffentlichte Version nachträglich verändert, schlägt der Build fehl.
 
-Der wichtige Unterschied zu `package-lock.json` oder `packages.lock.json`: `go.sum` bestimmt **nicht**, welche Versionen verwendet werden. Das tut allein `go.mod`. `go.sum` stellt nur sicher, dass die Versionen, die `go.mod` festlegt, unverändert sind. Ein separates Lockfile braucht Go nicht – das liegt am Algorithmus, mit dem Versionen ausgewählt werden.
+Der wichtige Unterschied zu `package-lock.json` oder `packages.lock.json`: `go.sum` bestimmt **nicht**, welche Versionen verwendet werden. Das tut allein `go.mod`. `go.sum` stellt nur sicher, dass die Versionen, die `go.mod` festlegt, unverändert sind.
 
-## Minimal Version Selection
+### Minimal Version Selection
 
 npm und NuGet lösen Versionsbereiche auf. `"lodash": "^4.17.0"` heißt „irgendeine 4.x ab 4.17.0“, und welche es wird, hängt davon ab, was zum Zeitpunkt der Installation veröffentlicht ist. Damit zwei Entwickler dasselbe bekommen, braucht es ein Lockfile.
 
 Go verwendet **Minimal Version Selection** (MVS). Jede `require`-Zeile ist eine Mindestversion, kein Bereich. Verlangt upwatch `golang.org/x/sys v0.48.0` und eine Abhängigkeit `v0.45.0`, wählt Go die höchste der geforderten Mindestversionen, also `v0.48.0` – und nicht die neueste, die es gerade gibt. Das Ergebnis hängt nur von den `go.mod`-Dateien im Graph ab, nicht von der Uhrzeit. Derselbe Code baut heute und in drei Jahren mit denselben Versionen.
 
-Der Trade-off: Updates passieren nie automatisch. Wenn eine Abhängigkeit einen Sicherheitsfix veröffentlicht, bekommst du ihn erst, wenn du `go get` ausführst. Deshalb ist der Abschnitt über `govulncheck` weiter unten kein Extra, sondern Teil des Arbeitsablaufs.
+Der Trade-off: Updates passieren nie automatisch. Wenn eine Abhängigkeit einen Sicherheitsfix veröffentlicht, bekommst du ihn erst, wenn du `go get` ausführst. Deshalb gehört govulncheck zum Arbeitsablauf und nicht in die Kategorie „nice to have“.
 
-Die vollständige Liste aller Module, die MVS ausgewählt hat, zeigt:
+Die vollständige Liste aller Module, die MVS ausgewählt hat, zeigt `go list -m all`. Sie ist länger als `go.mod`, weil sie auch Module enthält, die zwar im Abhängigkeitsgraph vorkommen, aber für den Build der upwatch-Pakete nicht gebraucht werden (etwa `golang.org/x/tools`, das nur die Tests von `modernc.org/libc` brauchen – `go mod why -m golang.org/x/tools` zeigt die Kette).
 
-```bash
-go list -m all
-```
-
-Sie ist länger als `go.mod`, weil sie auch Module enthält, die zwar im Abhängigkeitsgraph vorkommen, aber für den Build der upwatch-Pakete nicht gebraucht werden (etwa `golang.org/x/tools`, das nur die Tests von `modernc.org/libc` brauchen – `go mod why -m golang.org/x/tools` zeigt die Kette).
-
-## Modul-Proxy und Checksum-Datenbank
+### Modul-Proxy und Checksum-Datenbank
 
 Woher kommen die Module? Standardmäßig nicht direkt von GitHub:
 
@@ -253,7 +301,7 @@ sum.golang.org
 
 Für private Module in Firmen-Repositorys setzt du `GOPRIVATE` (zum Beispiel `GOPRIVATE=github.com/meinefirma/*`). Diese Module werden dann direkt geholt und nicht gegen die öffentliche Datenbank geprüft.
 
-## Die toolchain-Direktive
+### Die toolchain-Direktive
 
 Seit Go 1.21 kann die Toolchain sich selbst aktualisieren. Verlangt die `go`-Zeile eines Moduls eine neuere Version als die installierte, lädt `go` die passende Version herunter und führt den Befehl damit aus – vorausgesetzt, `GOTOOLCHAIN` steht auf `auto`, was der Standard ist.
 
@@ -277,61 +325,17 @@ Das heißt: Das Modul funktioniert ab Go 1.26.0, aber wer im Projekt arbeitet, n
 go: downloading go1.27.2 (darwin/arm64)
 ```
 
-Die heruntergeladene Toolchain landet im Modul-Cache; deine Installation bleibt unverändert. Eine vergleichbare Funktion bietet in .NET die `global.json`, in Node das Feld `engines` zusammen mit einem Versionsmanager – nur dass Go das selbst erledigt.
+Die heruntergeladene Toolchain landet im Modul-Cache; deine Installation bleibt unverändert. Eine vergleichbare Funktion bietet in .NET die `global.json`, in Node das Feld `engines` zusammen mit einem Versionsmanager – nur dass Go das selbst erledigt. Praktisch wird das, wenn govulncheck Schwachstellen in der Standardbibliothek meldet: Die steckt im Binary, also hilft dort kein `go get`, sondern nur eine neuere Go-Version (Teil 13).
 
-## Schwachstellen finden: govulncheck
+### Build-Optionen
 
-`govulncheck` gleicht deinen Code mit der Go-Schwachstellendatenbank (vuln.go.dev) ab. Es muss nicht installiert werden; `go run` mit Versionsangabe lädt und startet es:
-
-```bash
-go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-```
-
-Im Unterschied zu `npm audit` prüft govulncheck nicht nur, ob ein betroffenes Modul im Graph vorkommt, sondern ob dein Code die betroffene Funktion tatsächlich aufruft. Das reduziert Fehlalarme erheblich. Die Ausgabe trennt deshalb zwischen Schwachstellen, die erreichbar sind, und solchen, die nur „irgendwo im Graph“ liegen.
-
-Ein echter Lauf gegen upwatch mit Go 1.27.1 zeigt, wie das in der Praxis aussieht:
-
-```
-Vulnerability #1: GO-2026-6617
-    Found in: net/http/internal/http2@go1.27.1
-    Fixed in: net/http/internal/http2@go1.27.2
-…
-      #36: internal/check/check.go:114:16: check.Checker.Check calls io.Copy,
-           which eventually calls http2.transportResponseBody.Read
-
-Your code is affected by 9 vulnerabilities from the Go standard library.
-This scan also found 2 vulnerabilities in packages you import and 2
-vulnerabilities in modules you require, but your code doesn't appear to call
-these vulnerabilities.
-```
-
-Die gefundenen Schwachstellen liegen in der Standardbibliothek, nicht in einer externen Abhängigkeit. Weil die Standardbibliothek ins Binary einkompiliert wird, hilft hier kein `go get`, sondern nur eine neuere Go-Version – also genau das, wofür die `toolchain`-Direktive da ist. govulncheck zeigt außerdem den Aufrufpfad aus deinem Code heraus, hier von `Checker.Check` bis in den HTTP/2-Client. Das ist der Grund, warum govulncheck in die CI gehört ([ci.yml](../.github/workflows/ci.yml) führt es bei jedem Lauf aus): Ein Projekt, an dessen Code sich nichts ändert, kann trotzdem morgen verwundbar sein.
-
-## Build-Varianten
-
-Ein paar `go build`-Optionen, die upwatch im [Makefile](../Makefile) verwendet:
+Das [Makefile](../Makefile) baut upwatch mit ein paar zusätzlichen Optionen:
 
 ```bash
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=v1.0.0" -o bin/upwatch ./cmd/upwatch
 ```
 
-`CGO_ENABLED=0` schaltet die C-Anbindung ab und erzwingt ein statisch gelinktes Binary. `-trimpath` entfernt lokale Dateipfade aus dem Binary, damit Builds auf verschiedenen Rechnern identisch sind und keine Verzeichnisnamen preisgeben. `-ldflags "-s -w"` lässt Symboltabelle und Debug-Informationen weg und macht die Datei kleiner. `-X main.version=…` setzt beim Linken den Wert der Paketvariablen `version` in [main.go](../cmd/upwatch/main.go) – ein einfacher Weg, die Git-Version ins Binary zu bringen, ohne eine Datei zu generieren.
-
-Welche Go-Version und welche Modulversionen in einem Binary stecken, liest `go version -m` aus:
-
-```bash
-go version -m bin/upwatch-linux-amd64
-```
-
-```
-bin/upwatch-linux-amd64: go1.27.1
-	path	github.com/casoon/go-tutorial/cmd/upwatch
-	mod	github.com/casoon/go-tutorial	(devel)
-	dep	github.com/dustin/go-humanize	v1.0.1	h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
-	…
-```
-
-Damit kannst du auch Jahre später feststellen, ob ein ausgeliefertes Binary von einer Schwachstelle betroffen ist. govulncheck prüft solche Binaries direkt mit `govulncheck -mode=binary`.
+`CGO_ENABLED=0` erzwingt ein Binary ohne C-Anbindung, `-trimpath` entfernt lokale Pfade, `-ldflags` macht die Datei kleiner und schreibt die Version in die Variable `version` in [main.go](../cmd/upwatch/main.go). Was die Optionen genau bewirken und wie viel sie bringen, steht in Teil 15. Welche Go-Version und welche Modulversionen in einem fertigen Binary stecken, liest `go version -m bin/upwatch` aus – auch Jahre später.
 
 ## Im Projekt
 
@@ -342,10 +346,10 @@ Damit kannst du auch Jahre später feststellen, ob ein ausgeliefertes Binary von
 
 ## Übungen
 
-1. Lege außerhalb des Repositorys ein Modul `example.com/ping` an, schreibe ein Programm, das `https://example.com` mit `http.Get` abruft und den Statuscode ausgibt, und baue es mit `GOOS=linux GOARCH=arm64 go build`. Prüfe das Ergebnis mit `file` und `go version -m`.
-2. Führe im upwatch-Repository `go mod why -m golang.org/x/sys` und `go list -m all | wc -l` aus. Warum stehen in `go list -m all` mehr Module als in `go.mod`?
-3. Führe govulncheck gegen upwatch aus. Welche Schwachstellen sind erreichbar, und was wäre die passende Gegenmaßnahme? Setze sie testweise mit `go mod edit -toolchain=…` um und mache die Änderung danach mit `git checkout go.mod` rückgängig.
-4. Baue in einer Kopie der Datei [hello/main.go](../beispiele/02-toolchain-und-module/hello/main.go) absichtlich einen Fehler ein, den der Compiler nicht findet, `go vet` aber schon – zum Beispiel `fmt.Printf("%d\n", "text")`.
+1. **Aufwärmen:** Rücke in deinem `vetdemo`-Modul eine Zeile mit Leerzeichen statt Tab ein und füge überflüssige Leerzeichen um ein Komma ein. Was meldet `gofmt -l .`, was ändert `go fmt ./...`?
+2. **Kern:** Lege außerhalb des Repositorys ein Modul `example.com/ping` an, schreibe ein Programm, das `https://example.com` mit `http.Get` abruft und den Statuscode ausgibt, und baue es mit `GOOS=linux GOARCH=arm64 go build`. Prüfe das Ergebnis mit `file` und `go version -m`.
+3. **Kern:** Führe im upwatch-Repository `go mod why -m golang.org/x/sys` und `go list -m all | wc -l` aus. Warum stehen in `go list -m all` mehr Module als in `go.mod`?
+4. **Profi:** Setze im `ping`-Modul aus Übung 2 mit `go mod edit -toolchain=…` eine neuere Patch-Version, als du installiert hast, und führe danach `go version` aus. Was lädt Go herunter, wo landet es, und was ändert sich an deiner Go-Installation? Was passiert, wenn du `GOTOOLCHAIN=local go version` aufrufst?
 
 ---
 

@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel weißt du, wo Go Speicher anlegt, was der Garbage Collector tut und wie du mit Benchmarks und pprof herausfindest, ob sich eine Optimierung lohnt – und warum sie sich bei upwatch meistens nicht lohnt.
 
+> **upwatch in diesem Teil:** Vorallokation in [httpapi.go](../internal/httpapi/httpapi.go), der Benchmark in [monitor_test.go](../internal/monitor/monitor_test.go) und pprof am Debug-Listener in [main.go](../cmd/upwatch/main.go)
+> **Voraussetzungen:** Teil 11 (Benchmarks mit `b.Loop`), Teil 12 (Debug-Listener)
+
 ## Erst messen
 
 Dieses Kapitel steht absichtlich fast am Ende. Go-Code ist ohne besondere Mühe schnell genug für die meisten Server: kompiliert, mit Werttypen, ohne JIT-Aufwärmphase und mit einer Laufzeit, die tausende gleichzeitige Verbindungen mit wenig Speicher bedient. Die typischen Engpässe eines Services sind Datenbankabfragen, Netzwerk und Sperren, nicht die Schleife, die einen String zusammensetzt.
@@ -12,33 +15,47 @@ Die Regel, die in der Go-Community immer wieder zitiert wird, lautet daher: erst
 
 Ein Go-Programm legt Werte an zwei Orten ab. Der Stack gehört einer einzelnen Goroutine, wächst und schrumpft mit den Funktionsaufrufen und kostet beim Aufräumen nichts: Kehrt eine Funktion zurück, ist ihr Bereich frei. Der Heap ist gemeinsamer Speicher, den der Garbage Collector verwaltet. Alles, was dort liegt, muss der GC irgendwann finden, prüfen und freigeben.
 
-In C# entscheidet der Typ, wo ein Wert landet: `struct` tendenziell auf dem Stack, `class` immer auf dem Heap. In Java liegen Objekte grundsätzlich auf dem Heap, und der JIT kann einzelne Allokationen per Escape Analysis wegoptimieren. In Go entscheidet nicht der Typ und nicht `new` oder `&`, sondern allein der Compiler, und zwar danach, ob ein Wert die Funktion überlebt. Ein `&result{}` kann auf dem Stack landen, ein `make([]int, n)` auf dem Heap. Für die Korrektheit ist das egal – Go hat keine hängenden Zeiger, weil der Compiler einen Wert, auf den nach dem Return noch jemand zeigt, automatisch auf den Heap legt. Für die Performance ist es nicht egal, denn Heap-Allokationen kosten Zeit beim Anlegen und Arbeit für den GC.
+Wer entscheidet, wo ein Wert landet, ist in den drei Sprachen verschieden:
+
+| Sprache | Wer entscheidet über Stack oder Heap |
+|---|---|
+| C# | der Typ: `struct` als lokale Variable auf dem Stack, `class` immer auf dem Heap; `stackalloc` mit `Span<T>` fordert Stack-Speicher ausdrücklich an |
+| Java | Objekte grundsätzlich auf dem Heap; der JIT kann einzelne Allokationen per Escape Analysis wegoptimieren |
+| Go | allein der Compiler, danach, ob ein Wert die Funktion überlebt – nicht der Typ und nicht `new` oder `&` |
+
+Go-Structs sind Werttypen wie C#-`struct`s, aber es gibt kein Gegenstück zu `class` und kein `stackalloc`: Ein `&result{}` kann auf dem Stack landen, ein `make([]int, n)` auf dem Heap. Für die Korrektheit ist das egal – Go hat keine hängenden Zeiger, weil der Compiler einen Wert, auf den nach dem Return noch jemand zeigt, automatisch auf den Heap legt. Für die Performance ist es nicht egal, denn Heap-Allokationen kosten Zeit beim Anlegen und Arbeit für den GC.
 
 ## Escape Analysis sichtbar machen
 
 Der Compiler verrät seine Entscheidungen mit `-gcflags=-m`. Das Beispiel [beispiele/14-performance/escape](../beispiele/14-performance/escape/main.go) enthält vier kleine Funktionen:
 
 ```go
-func up(r result) bool {
+func up(r result) bool { // line 16
 	return r.statusCode >= 200 && r.statusCode < 400
 }
 
-func newResult(code int) *result {
+func newResult(code int) *result { // line 22
 	r := result{statusCode: code}
 	return &r
 }
 
-func sum() int64 {
+func sum() int64 { // line 29
 	durations := make([]int64, 8)
 	// ... fill and add up
 }
 
-func collect(n int) []int64 {
+func collect(n int) []int64 { // line 42
 	durations := make([]int64, 0, n)
 	for i := range n {
 		durations = append(durations, int64(i))
 	}
 	return durations
+}
+
+func main() {
+	r := result{statusCode: 200, durationMS: 42}
+	p := newResult(503)
+	fmt.Println(up(r), up(*p), sum(), len(collect(4))) // line 53
 }
 ```
 
@@ -46,13 +63,14 @@ func collect(n int) []int64 {
 go build -gcflags=-m -o /dev/null ./beispiele/14-performance/escape
 ```
 
-Mit Go 1.27 auf einem Apple-M-Rechner liefert das (gekürzt: Pfade auf den Dateinamen verkürzt, ohne die Zeilen zu `fmt.Println`):
+Mit Go 1.27 auf einem Apple-M-Rechner liefert das (gekürzt: Pfade auf den Dateinamen verkürzt, ohne die übrigen Zeilen zu Zeile 53):
 
 ```
 ./main.go:16:6: can inline up
 ./main.go:22:6: can inline newResult
 ./main.go:29:6: can inline sum
 ./main.go:42:6: can inline collect
+./main.go:53:47: inlining call to collect
 ./main.go:23:2: moved to heap: r
 ./main.go:30:19: make([]int64, 8) does not escape
 ./main.go:43:19: make([]int64, 0, n) escapes to heap
@@ -68,7 +86,7 @@ Die Zeilen lesen sich so:
 - In `sum` hat der Slice eine feste Größe und verlässt die Funktion nicht. Er liegt auf dem Stack.
 - In `collect` ist die Größe erst zur Laufzeit bekannt und der Slice wird zurückgegeben. Er liegt auf dem Heap.
 
-Die letzten beiden Zeilen sind der interessante Teil. Weil `collect` klein genug ist, wird der Aufruf `collect(4)` in `main` inlined. Danach kennt der Compiler die Kapazität (4) und sieht, dass das Ergebnis `main` nicht verlässt – und legt den Slice auf den Stack. Ob etwas auf den Heap kommt, hängt also nicht nur von der Funktion ab, sondern auch davon, wo und wie sie aufgerufen wird. Das ist einer der Gründe, warum man Performance-Fragen nicht durch Lesen von Code beantworten sollte, sondern durch Messen.
+Die Zeilen mit `53:47` sind der interessante Teil. Sie beziehen sich auf den Aufruf `collect(4)` in `main`, nicht auf die Funktion selbst. Weil `collect` klein genug ist, wird er dort inlined („inlining call to collect“): Der Rumpf wird an die Aufrufstelle kopiert. Danach kennt der Compiler die Kapazität (4) und sieht, dass das Ergebnis `main` nicht verlässt – und legt den Slice auf den Stack. Ob etwas auf den Heap kommt, hängt also nicht nur von der Funktion ab, sondern auch davon, wo und wie sie aufgerufen wird. Das ist einer der Gründe, warum man Performance-Fragen nicht durch Lesen von Code beantworten sollte, sondern durch Messen.
 
 Für den Alltag reicht eine grobe Faustregel: Werte, die zurückgegeben werden, in Interfaces landen (auch als Argument für `fmt.Println` oder `slog`), in Closures eingefangen werden, die länger leben, oder deren Größe erst zur Laufzeit feststeht, landen meist auf dem Heap.
 
@@ -123,9 +141,20 @@ Die Länge mit `make(T, n)` statt der Kapazität zu setzen und dann `append` auf
 
 Strings sind in Go unveränderlich, `[]byte` ist veränderbar. Die Umwandlung zwischen beiden kopiert in der Regel die Daten, weil sonst jemand über das `[]byte` den String ändern könnte. Der Compiler spart sich die Kopie in einigen eindeutigen Fällen, etwa bei `m[string(b)]` als Map-Schlüssel oder bei Vergleichen. Wenn du ständig hin- und herwandelst, lohnt es sich, bei einer Darstellung zu bleiben: `bytes` und `strings` haben fast dieselben Funktionen.
 
-`s += x` in einer Schleife legt bei jedem Schritt einen neuen String an und kopiert alles bisherige. Das ist dasselbe Problem wie in Java und C#, und die Lösung ist dieselbe: ein Builder. `strings.Builder` sammelt in einem wachsenden Puffer und gibt am Ende den String zurück, ohne den Puffer noch einmal zu kopieren.
+`s += x` in einer Schleife legt bei jedem Schritt einen neuen String an und kopiert alles bisherige. Das ist dasselbe Problem wie in Java und C#, und die Lösung ist dieselbe: ein Builder. `strings.Builder` sammelt in einem wachsenden Puffer und gibt am Ende den String zurück, ohne den Puffer noch einmal zu kopieren. Das Beispiel stellt beide Varianten nebeneinander:
 
 ```go
+func joinPlus(codes []int) string {
+	s := ""
+	for i, c := range codes {
+		if i > 0 {
+			s += ","
+		}
+		s += strconv.Itoa(c)
+	}
+	return s
+}
+
 func joinBuilder(codes []int) string {
 	var b strings.Builder
 	for i, c := range codes {
@@ -173,7 +202,7 @@ BenchmarkCollectGrow-14        	  249103	      4836 ns/op	   59368 B/op	      11
 BenchmarkCollectPrealloc-14    	  661416	      1924 ns/op	   24576 B/op	       1 allocs/op
 ```
 
-Die Spalten sind Iterationen, Zeit pro Aufruf, Bytes pro Aufruf und Allokationen pro Aufruf. Die Allokationsspalten sind oft aussagekräftiger als die Zeit, weil sie stabil sind und direkt zeigen, was der GC später aufräumen muss. Die 107 Allokationen beim Builder sind übrigens nicht der Builder selbst: 100 davon kommen von `strconv.Itoa`, das für jede Zahl einen kleinen String erzeugt. Wer auch die loswerden will, schreibt mit `strconv.AppendInt` direkt in einen `[]byte`-Puffer. Bei 100 Statuscodes lohnt das nicht.
+Die Spalten sind Iterationen, Zeit pro Aufruf, Bytes pro Aufruf und Allokationen pro Aufruf. `JoinPlus` braucht knapp 300 Allokationen für 100 Zahlen, weil jedes `+=` einen neuen String anlegt. Die Allokationsspalten sind oft aussagekräftiger als die Zeit, weil sie stabil sind und direkt zeigen, was der GC später aufräumen muss. Die 107 Allokationen beim Builder sind übrigens nicht der Builder selbst: 100 davon kommen von `strconv.Itoa`, das für jede Zahl einen kleinen String erzeugt. Wer auch die loswerden will, schreibt mit `strconv.AppendInt` direkt in einen `[]byte`-Puffer. Bei 100 Statuscodes lohnt das nicht.
 
 Einzelne Läufe schwanken. Zeiten aus einem einzigen Lauf zu vergleichen, führt zu Schlussfolgerungen aus Rauschen. Das Werkzeug dafür ist `benchstat` aus `golang.org/x/perf`: Du lässt Vorher und Nachher jeweils mehrfach laufen und vergleichst die Verteilungen.
 
@@ -185,6 +214,16 @@ go run golang.org/x/perf/cmd/benchstat@latest old.txt new.txt
 ```
 
 `benchstat` zeigt für jeden Benchmark Median und Schwankung beider Läufe, die Änderung in Prozent und ob sie statistisch belastbar ist. Steht dort `~`, ist der Unterschied nicht von Rauschen zu unterscheiden. Für die Werte oben (sechs Läufe) meldete benchstat zum Beispiel `7.284µ ± 6%` für `JoinPlus` – sechs Prozent Schwankung auf einem Laptop mit laufenden Hintergrundprozessen. Eine „Optimierung“ um drei Prozent wäre darin nicht sichtbar.
+
+### Jetzt du: selbst messen
+
+Lass dieselben Benchmarks auf deinem Rechner laufen und vergleiche mit der Tabelle oben:
+
+```bash
+go test -bench=. -benchmem ./beispiele/14-performance/bench
+```
+
+Die Spalten `ns/op` werden abweichen, `B/op` und `allocs/op` sollten identisch sein – sie hängen vom Code ab, nicht von der Maschine. Schon ein zweiter Lauf auf demselben M4 Pro ergab für `JoinPlus` 7879 statt 6875 ns/op, bei unveränderten 42064 B/op und 298 allocs/op. Ändere danach `statusCodes(100)` in `BenchmarkJoinPlus` auf `statusCodes(1000)`: Wie wachsen Zeit und Bytes?
 
 ## pprof: Wo die Zeit wirklich hingeht
 
@@ -249,7 +288,18 @@ Profile kannst du auch aus Tests erzeugen, ohne Server: `go test -cpuprofile cpu
 
 ## Was das für upwatch bedeutet
 
-Ein Check in upwatch wartet auf DNS, auf den TCP-Handshake, auf TLS und auf die Antwort eines fremden Servers. Das dauert Millisekunden bis Sekunden. Die CPU-Arbeit drumherum – Request bauen, Statuscode lesen, Ergebnis in SQLite schreiben – liegt im Bereich von Mikrosekunden. Der einzige Benchmark im Projekt, der für `NormalizeURL`, meldete rund 220 ns pro Aufruf auf dem M4 Pro mit Go 1.27.1 – für eine Funktion, die nur beim Anlegen eines Ziels läuft. Selbst eine Funktion im Check-Pfad doppelt so schnell zu machen, änderte an der Laufzeit eines Checks nichts Messbares.
+Ein Check in upwatch wartet auf DNS, auf den TCP-Handshake, auf TLS und auf die Antwort eines fremden Servers. Das dauert Millisekunden bis Sekunden. Die CPU-Arbeit drumherum – Request bauen, Statuscode lesen, Ergebnis in SQLite schreiben – liegt im Bereich von Mikrosekunden. Der einzige Benchmark im Projekt misst `NormalizeURL`:
+
+```bash
+go test -run='^$' -bench=NormalizeURL -benchmem ./internal/monitor
+```
+
+```
+cpu: Apple M4 Pro
+BenchmarkNormalizeURL-14    	 5399044	       222.8 ns/op	     192 B/op	       2 allocs/op
+```
+
+Gut 220 Nanosekunden und zwei Allokationen auf dem M4 Pro mit Go 1.27.1 – für eine Funktion, die nur beim Anlegen eines Ziels läuft. `-run='^$'` passt auf keinen Testnamen und überspringt so die normalen Tests. Selbst eine Funktion im Check-Pfad doppelt so schnell zu machen, änderte an der Laufzeit eines Checks nichts Messbares.
 
 Was bei upwatch tatsächlich Durchsatz bestimmt, ist die Zahl der Worker (`UPWATCH_WORKERS`), weil sie festlegt, wie viele Checks gleichzeitig auf Netzwerk warten dürfen, und der Check-Timeout, weil hängende Ziele Worker belegen. Das sind Konfigurationsfragen, keine Code-Optimierungen. Der einzelne Writer, der Ergebnisse in SQLite schreibt, wäre der nächste Engpass, aber erst bei einer Zahl von Zielen, für die man ohnehin über eine andere Datenbank nachdenken würde.
 
@@ -287,10 +337,10 @@ Setze `sync.Pool` nur ein, wenn ein Profil zeigt, dass die Allokationen genau di
 
 ## Übungen
 
-1. Führe `go build -gcflags=-m ./internal/httpapi` aus und suche die Zeilen zu `out` in `listTargets`. Landet der Slice auf dem Heap? Warum? Probiere `-gcflags='-m -m'` für die ausführliche Begründung.
-2. `Store.Results` baut seinen Slice ohne Kapazität auf, obwohl `limit` bekannt ist. Schreib einen Benchmark gegen eine echte SQLite-Datenbank im Temp-Verzeichnis (`t.TempDir()` gibt es auch als `b.TempDir()`), der 1000 Ergebnisse liest, ändere die Zeile auf `make([]monitor.Result, 0, limit)` und vergleiche mit `benchstat`. Lohnt sich das, wenn die meisten Abfragen nur 50 Zeilen liefern?
-3. Starte upwatch mit `UPWATCH_DEBUG_ADDR=127.0.0.1:6060`, lege einige Ziele an und hole das Goroutine-Profil mit `go tool pprof -top http://127.0.0.1:6060/debug/pprof/goroutine`. Findest du die Worker des Schedulers wieder? Wie viele sind es, und passt das zu `UPWATCH_WORKERS`?
-4. Starte upwatch mit `GODEBUG=gctrace=1` und lies die Zeilen auf stderr. Wie groß ist das Heap-Ziel, und wie oft läuft der GC im Leerlauf? Wiederhole es mit `GOGC=400`.
+1. **Aufwärmen:** Führe `go build -gcflags=-m ./internal/httpapi` aus und suche die Zeilen zu `out` in `listTargets`. Landet der Slice auf dem Heap? Warum? Probiere `-gcflags='-m -m'` für die ausführliche Begründung.
+2. **Profi:** `Store.Results` baut seinen Slice ohne Kapazität auf, obwohl `limit` bekannt ist. Schreib einen Benchmark gegen eine echte SQLite-Datenbank im Temp-Verzeichnis (`t.TempDir()` gibt es auch als `b.TempDir()`), der 1000 Ergebnisse liest, ändere die Zeile auf `make([]monitor.Result, 0, limit)` und vergleiche mit `benchstat`. Lohnt sich das, wenn die meisten Abfragen nur 50 Zeilen liefern?
+3. **Kern:** Starte upwatch mit Debug-Listener (`UPWATCH_DEBUG_ADDR=127.0.0.1:6060 go run ./cmd/upwatch`), lege in einem zweiten Terminal einige Ziele an und hole das Goroutine-Profil mit `go tool pprof -top http://127.0.0.1:6060/debug/pprof/goroutine`. Findest du die Worker des Schedulers wieder? Wie viele sind es, und passt das zu `UPWATCH_WORKERS`?
+4. **Kern:** Starte upwatch mit `GODEBUG=gctrace=1` und lies die Zeilen auf stderr. Wie groß ist das Heap-Ziel, und wie oft läuft der GC im Leerlauf? Wiederhole es mit `GOGC=400`.
 
 ---
 

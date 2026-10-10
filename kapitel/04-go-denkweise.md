@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel kannst du Go-Code so strukturieren, wie Go-Entwickler es erwarten: mit Komposition statt Vererbung, kleinen Interfaces beim Konsumenten, Funktionen als Bausteinen, Dependency Injection ohne Framework und Typen, deren Zero Value funktioniert.
 
+> **upwatch in diesem Teil:** die Store-Interfaces in [scheduler.go](../internal/scheduler/scheduler.go) und [httpapi.go](../internal/httpapi/httpapi.go), der Store in [store.go](../internal/sqlitestore/store.go) und die Verdrahtung in [main.go](../cmd/upwatch/main.go)
+> **Voraussetzungen:** Teil 03
+
 Dieses Kapitel ist wichtiger als die Syntax. Die meisten Probleme, die Umsteiger mit Go haben, entstehen nicht an Sprachfeatures, sondern daran, dass sie die Struktur einer C#- oder Java-Anwendung eins zu eins übertragen.
 
 ## Nicht C# in Go nachbauen
@@ -123,6 +126,8 @@ func Open(ctx context.Context, path string) (*Store, error)
 
 mit Methoden `CreateTarget`, `Target`, `Targets`, `DeleteTarget`, `ClaimDue`, `SaveResult`, `Results`, `Ping` und `Close`. Ein Interface definiert sqlitestore nicht.
 
+Fast alle diese Methoden bekommen als ersten Parameter `ctx context.Context`. Damit lassen sich laufende Operationen abbrechen und mit Fristen versehen. Für dieses Kapitel spielt das keine Rolle: `ctx` kannst du bis Teil 07 ignorieren.
+
 Der Scheduler braucht davon genau zwei Methoden und sagt das in [scheduler.go](../internal/scheduler/scheduler.go):
 
 ```go
@@ -157,6 +162,35 @@ sched := scheduler.New(store, checker, logger, cfg.Workers, cfg.Tick)
 …
 Handler: httpapi.New(store, logger),
 ```
+
+Als Bild:
+
+```text
+                  sqlitestore (kennt keines der Interfaces)
+               ┌──────────────────────────────────┐
+               │ *sqlitestore.Store               │
+               │   CreateTarget   Target          │
+               │   Targets        DeleteTarget    │
+               │   ClaimDue       SaveResult      │
+               │   Results        Ping    Close   │
+               └────────┬────────────────┬────────┘
+              erfüllt   │                │   erfüllt
+              implizit  ▼                ▼   implizit
+┌───────────────────────────┐    ┌───────────────────────────┐
+│ scheduler.Store (2)       │    │ httpapi.Store (6)         │
+│   ClaimDue                │    │   CreateTarget   Target   │
+│   SaveResult              │    │   Targets  DeleteTarget   │
+│                           │    │   Results        Ping     │
+└───────────────────────────┘    └───────────────────────────┘
+              ▲                                ▲
+              │ scheduler.New(store, …)        │ httpapi.New(store, …)
+              └───────────────┬────────────────┘
+                              │
+                    main: store, err := sqlitestore.Open(…)
+                    hier prüft der Compiler, ob es passt
+```
+
+Die Pfeile nach unten sind keine Importe und keine Deklaration im Code. Sie entstehen erst in `main`, wenn der Compiler sieht, dass derselbe `*sqlitestore.Store` an zwei Stellen übergeben wird, die zwei verschiedene Interfaces erwarten. In C# müsste `SqliteStore` beide Interfaces in seiner Klassendeklaration nennen und damit beide Konsumenten-Assemblies referenzieren oder die Interfaces in eine gemeinsame Contracts-Assembly auslagern.
 
 Was bringt das?
 
@@ -227,28 +261,27 @@ NewRunner(store, always).RunOnce()
 
 ### Middleware
 
-Middleware ist in Go kein Framework-Konzept, sondern eine Funktion, die einen Handler nimmt und einen Handler zurückgibt. So steht es in [middleware.go](../internal/httpapi/middleware.go):
-
-```go
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Cache-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
-}
-```
-
-Verkettet wird durch Verschachteln, in `httpapi.New`:
+Dasselbe Prinzip trägt die Middleware: eine Funktion, die einen Handler nimmt und einen neuen Handler zurückgibt, der vorher oder nachher etwas tut und dazwischen den alten aufruft. In upwatch werden drei davon in einer einzigen Zeile in `httpapi.New` verschachtelt:
 
 ```go
 return a.logRequests(a.recoverPanics(securityHeaders(mux)))
 ```
 
-Gelesen von außen nach innen: Zuerst misst `logRequests` die Dauer, dann fängt `recoverPanics` Panics ab, dann setzt `securityHeaders` die Header, dann routet der Mux. Es gibt kein `app.UseXxx()`, keine Pipeline-Konfiguration und keine Reihenfolge, die irgendwo anders festgelegt wird – die Reihenfolge steht in dieser einen Zeile.
+Die Reihenfolge der Middlewares steht damit in dieser Zeile und nirgends sonst – kein `app.UseXxx()` wie in ASP.NET Core, keine Filter-Registrierung wie bei Servlets. Wie die Zwiebel aus Handlern im Detail aussieht und warum die Reihenfolge so gewählt ist, zeigt Teil 08.
 
-Das Beispiel enthält dasselbe für Checks: `WithRetry(next Checker, n int) Checker` wiederholt einen Check, der mit 5xx fehlschlug. Der zurückgegebene Checker ist eine `CheckFunc`, die `next` aufruft.
+Das Beispiel enthält dasselbe für Checks: `WithRetry(next Checker, n int) Checker` wiederholt einen Check, der mit 5xx fehlschlug. Der zurückgegebene Checker ist eine `CheckFunc`, die `next` aufruft:
+
+```go
+func WithRetry(next Checker, n int) Checker {
+	return CheckFunc(func(url string) int {
+		status := next.Check(url)
+		for i := 0; i < n && status >= 500; i++ {
+			status = next.Check(url)
+		}
+		return status
+	})
+}
+```
 
 ### Abhängigkeiten als Funktion übergeben
 
@@ -310,13 +343,15 @@ func Open(ctx context.Context, path string) (*Store, error)
 
 Parameter als Interface, weil die Funktion dann mit allem funktioniert, was die nötigen Methoden hat – inklusive Fakes. Rückgabe als konkreter Typ, weil der Aufrufer dann alles bekommt, was der Typ kann, und selbst entscheiden kann, welches Interface er daraus macht. Gäbe `sqlitestore.Open` ein `scheduler.Store` zurück, könnte die API ihn nicht verwenden. Gäbe es ein großes `sqlitestore.StoreInterface` zurück, wären wir wieder beim Interface auf Vorrat.
 
+Die zweite Zeile scheint dem Leitsatz zu widersprechen: `check.New` nimmt einen konkreten `*http.Client`. Der Grund ist, dass `http.Client` selbst schon die austauschbare Stelle hat. Ein Client ist im Wesentlichen Konfiguration – Timeouts, Redirect-Verhalten – um ein Feld `Transport` vom Interface-Typ `http.RoundTripper` herum, und dieser Transport führt die eigentlichen Anfragen aus. Wer im Test kein Netz will, setzt einen eigenen `RoundTripper` ein oder startet mit `httptest.NewServer` einen lokalen Server (Teil 11). `check.NewClient` nutzt dieselbe Stelle für den SSRF-Schutz (Teil 13). Ein eigenes Interface `HTTPDoer` vor dem Client brächte also keine zusätzliche Austauschbarkeit, nur einen Namen mehr.
+
 Auch diese Regel hat Ausnahmen, und upwatch enthält eine: `httpapi.New` gibt `http.Handler` zurück, kein `*API`.
 
 ```go
 func New(store Store, logger *slog.Logger) http.Handler
 ```
 
-Das ist bewusst. Der Aufrufer braucht nur etwas, das HTTP-Anfragen beantwortet, und das Ergebnis ist nicht der `*API`-Wert selbst, sondern der Mux eingewickelt in drei Middlewares. Ein konkreter Typ dafür hätte keinen Nutzen. Wenn eine Funktion je nach Situation verschiedene Implementierungen liefert oder das Ergebnis eine Komposition ist, ist ein Interface als Rückgabe richtig.
+Der Aufrufer braucht nur etwas, das HTTP-Anfragen beantwortet, und das Ergebnis ist nicht der `*API`-Wert selbst, sondern der Mux eingewickelt in drei Middlewares. Ein konkreter Typ dafür hätte keinen Nutzen. Wenn eine Funktion je nach Situation verschiedene Implementierungen liefert oder das Ergebnis eine Komposition ist, ist ein Interface als Rückgabe richtig.
 
 ## Dependency Injection ohne Framework
 
@@ -354,6 +389,10 @@ func main() {
 }
 ```
 
+### Jetzt du
+
+Starte das Beispiel einmal mit dem Default und einmal ohne Wiederholung:
+
 ```bash
 go run ./beispiele/04-go-denkweise/interfaces
 RETRIES=0 go run ./beispiele/04-go-denkweise/interfaces
@@ -367,6 +406,13 @@ https://flaky.example      [200]
 ```
 https://example.com        [200]
 https://flaky.example      [503]
+```
+
+Der Fake-Checker antwortet für `flaky.example` zuerst mit 503, dann mit 200. Mit einer Wiederholung sieht der Runner die 200, mit `RETRIES=0` bleibt es bei der 503. Probiere danach `RETRIES=abc`: Der Fehler aus `strconv.Atoi` kommt eingepackt mit dem Variablennamen zurück, `main` gibt ihn aus und beendet sich mit Exit-Code 1.
+
+```
+RETRIES: strconv.Atoi: parsing "abc": invalid syntax
+exit status 1
 ```
 
 Weil `run` weder `os.Getenv` noch `os.Stdout` direkt verwendet, testet `TestRun` das komplette Programm ohne Umgebungsvariablen und ohne Ausgabe umzuleiten. upwatch trennt `main` und `run` aus einem verwandten Grund: `run` gibt einen Fehler zurück statt `os.Exit` aufzurufen, damit alle `defer` laufen.
@@ -428,10 +474,10 @@ Zum Vergleich: In C# hat eine Klasse ohne Konstruktor-Aufruf gar keinen Wert, so
 
 ## Übungen
 
-1. Schreib einen Test für den Scheduler, der einen Store verwendet, dessen `ClaimDue` immer einen Fehler zurückgibt. Wie viele Methoden muss dein Fake haben? Vergleiche mit dem, was du in C# mit einem `IStore` mit neun Methoden schreiben müsstest.
-2. Ergänze in [middleware.go](../internal/httpapi/middleware.go) gedanklich eine Middleware `requireJSON`, die `POST`-Anfragen ohne `Content-Type: application/json` mit `415` ablehnt. Wo in der Kette aus `httpapi.New` würdest du sie einhängen, und warum?
-3. Baue `countingStore` aus [embedding/main.go](../beispiele/04-go-denkweise/embedding/main.go) so um, dass er `Store` nicht einbettet, sondern als benanntes Feld hält. Welche Methoden musst du jetzt zusätzlich schreiben?
-4. Angenommen, upwatch soll Ergebnisse zusätzlich als CSV exportieren. Skizziere ein Paket `export` mit einer Funktion, die die nötigen Daten aus dem Store liest. Welches Interface definiert es, und muss sqlitestore dafür geändert werden?
+1. **Aufwärmen:** Baue `countingStore` aus [embedding/main.go](../beispiele/04-go-denkweise/embedding/main.go) so um, dass er `Store` nicht einbettet, sondern als benanntes Feld `inner Store` hält. Welche Methode fehlt jetzt, und an welcher Stelle meldet der Compiler das? Ergänze sie, passe in [main_test.go](../beispiele/04-go-denkweise/embedding/main_test.go) den Feldnamen an, und `go test ./beispiele/04-go-denkweise/embedding` muss wieder grün sein.
+2. **Kern:** Schreib in [interfaces/main.go](../beispiele/04-go-denkweise/interfaces/main.go) eine Funktion `WithFallback(primary, fallback Checker) Checker` nach dem Muster von `WithRetry`. Sie fragt zuerst `primary`; nur wenn der 0 (nicht erreichbar) oder einen Status ab 500 meldet, fragt sie `fallback` und gibt dessen Antwort zurück. Ein passender Test liegt schon bereit, ist aber hinter dem Build-Tag `uebung` versteckt, damit das Repository ohne deine Lösung kompiliert: `go test -tags uebung ./beispiele/04-go-denkweise/interfaces` schlägt mit „undefined: WithFallback“ fehl, bis die Funktion existiert, und prüft dann vier Fälle – auch, dass `fallback` bei einer guten Antwort gar nicht aufgerufen wird.
+3. **Kern:** Ergänze im selben Beispiel einen dritten Konsumenten: `WriteCSV(w io.Writer, store csvStore) error`, der pro Ergebnis eine Zeile `url,status` schreibt. Definiere `csvStore` mit genau den Methoden, die du brauchst, und rufe `WriteCSV` in `run` auf. Musstest du `MemStore` dafür ändern?
+4. **Profi:** Gib `Stats` in [embedding/main.go](../beispiele/04-go-denkweise/embedding/main.go) ein Feld `byCode map[int]int`, das zählt, wie oft jeder Statuscode vorkam. Sorge dafür, dass `var stats Stats` weiterhin ohne Konstruktor funktioniert, und erweitere `TestStatsZeroValue` um eine Prüfung der Zählung. Was passiert, wenn du die Map in `Record` nicht anlegst?
 
 ---
 

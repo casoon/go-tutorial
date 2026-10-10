@@ -2,49 +2,36 @@
 
 Nach diesem Kapitel erkennst du die Muster, die Entwickler aus C#, Java oder TypeScript typischerweise nach Go mitbringen, weißt, warum sie dort schlecht passen, und findest für jedes die idiomatische Form in upwatch wieder. Am Ende steht ein Rückblick auf das ganze Tutorial und Ideen, wie es weitergehen kann.
 
+> **upwatch in diesem Teil:** das ganze Projekt, vor allem [scheduler.go](../internal/scheduler/scheduler.go), [httpapi.go](../internal/httpapi/httpapi.go), [monitor.go](../internal/monitor/monitor.go) und [main.go](../cmd/upwatch/main.go)
+> **Voraussetzungen:** Teile 01–15, besonders Teil 04 (Go-Denkweise) und Teil 09 (Projektstruktur)
+
 ## Das eigentliche Problem: gute Gewohnheiten am falschen Ort
 
-Die meisten Fehler in diesem Kapitel sind keine Anfängerfehler. Es sind Muster, die in einem anderen Ökosystem gut begründet sind: `IUserService`, weil der DI-Container von ASP.NET Core Interfaces auflöst; `AbstractUserFactory`, weil Java keine freien Funktionen kennt; `BaseRepository<T>`, weil Entity Framework oder Spring Data die Basisklasse ohnehin mitbringen; `UserServiceImpl`, weil es das Interface schon gibt und die Implementierung irgendwie heißen muss. In Go fehlen die Gründe, die diese Muster nötig gemacht haben – und übrig bleibt die Indirektion.
+Die meisten Fehler in diesem Kapitel sind keine Anfängerfehler. Es sind Muster, die in einem anderen Ökosystem gut begründet sind: `IUserService`, weil der DI-Container von ASP.NET Core Interfaces auflöst; `AbstractUserFactory`, weil Java keine freien Funktionen kennt; `BaseRepository<T>`, weil Entity Framework oder Spring Data die Basisklasse ohnehin mitbringen. In Go fehlen die Gründe, die diese Muster nötig gemacht haben – und übrig bleibt die Indirektion.
 
-Die Go-Antwort ist in Kurzform: kleine Packages, kleine Interfaces, konkrete Structs, explizite Abhängigkeiten, explizite Fehler, wenig Abstraktion, Standardbibliothek zuerst. [Teil 04](04-go-denkweise.md) und [Teil 09](09-projektstruktur.md) haben die Begründungen ausführlich. Dieses Kapitel ist die Prüfliste dazu: jeweils was man sieht, warum es in Go schlecht passt und wie es in upwatch aussieht.
+Die Tabelle ist die Kurzfassung des Kapitels. Danach folgen ausführlich nur die Muster, deren Go-Form nicht offensichtlich ist; der Rest bekommt ein paar Zeilen und einen Verweis.
 
-## Klassenhierarchien und Namen aus dem Enterprise-Katalog
+| Mitgebrachtes Muster | Herkunft | Go-Form | Stelle in upwatch |
+|---|---|---|---|
+| `IUserService` + `UserServiceImpl`, Basisklassen | C#, Java | konkreter Typ, Name aus Package + Typ | `check.Checker`, `sqlitestore.Store` |
+| großes Interface beim Anbieter | C#, Java | kleines Interface beim Verbraucher | `Store` in [scheduler.go](../internal/scheduler/scheduler.go) |
+| Getter und Setter | C#-Properties, Java Beans | exportierte Felder, Konstruktor prüft | `monitor.Target`, `NewTarget` |
+| Exceptions, `try`/`catch` | alle drei | `(T, error)`, `%w`, `errors.Is`/`As` | `handleError` in [httpapi.go](../internal/httpapi/httpapi.go) |
+| `CancellationToken` im Feld, Request-Scope im Objekt | C#, Java | `ctx` als erster Parameter | `Scheduler.Run(ctx)`, `Checker.Check(ctx, …)` |
+| Fire-and-forget `Task.Run`, unbeobachtete Promise | C#, TypeScript | jede Goroutine hat ein Ende und einen Wartenden | `WaitGroup.Go` im Scheduler, `wg.Wait()` in `run` |
+| Referenzen überall | Java, C#-Klassen | Werte, Pointer nur mit Grund | `Check` nimmt und liefert Werte |
+| statische Initialisierer, Service Locator | Java, C# | Abhängigkeiten in `main` bauen und übergeben | `run` in [main.go](../cmd/upwatch/main.go), `Load(getenv)` |
+| `utils`, `common`, `helpers` | alle drei | Funktion neben ihrem Verbraucher | `isPublic` in `check`, `writeJSON` in `httpapi` |
+| generisches Repository, `Result<T>` | C#, Java, TypeScript | konkrete Typen, Generics für Datenstrukturen | kein eigener generischer Typ |
+| Framework vor der ersten Route | ASP.NET, Spring, NestJS | Standardbibliothek zuerst | eine direkte Abhängigkeit in [go.mod](../go.mod) |
 
-**Was man sieht:** `type IUserService interface`, `type UserServiceImpl struct`, `NewUserServiceFactory()`, ein Package `services` mit einem Interface und genau einer Implementierung, `BaseHandler` als eingebettetes Struct, das allen Handlern gemeinsame Methoden „vererbt“.
+## Kurz: Klassen, Interfaces, Getter
 
-**Warum es nicht passt:** Go hat keine Vererbung, und Interfaces werden implizit erfüllt. Ein Interface, das neben seiner einzigen Implementierung definiert ist, hat keinen Abnehmer, der von ihm abhängt – es ist nur ein zweiter Name für denselben Typ. Präfixe wie `I` und Suffixe wie `Impl` transportieren in Go keine Information. Eingebettete „Basisklassen“ führen zu Methoden, von denen man beim Lesen nicht weiß, wo sie herkommen.
+**Klassenhierarchien und Namen aus dem Enterprise-Katalog.** Go hat keine Vererbung, und ein Interface neben seiner einzigen Implementierung ist nur ein zweiter Name für denselben Typ; `I`-Präfixe und `Impl`-Suffixe tragen keine Information. In upwatch heißen die Typen `check.Checker`, `scheduler.Scheduler`, `sqlitestore.Store`, erzeugt von einfachen Funktionen statt Factories; Gemeinsames steckt in Middleware statt in einer Basisklasse. Die Begründung steht in [Teil 04](04-go-denkweise.md).
 
-**Idiomatisch:** Der Typ heißt nach dem, was er ist, und der Package-Name liefert den Kontext. In upwatch gibt es `check.Checker`, `scheduler.Scheduler` und `sqlitestore.Store`, erzeugt mit `check.New`, `scheduler.New` und `sqlitestore.Open`. Keine Factory, weil eine Funktion reicht. Gemeinsames Verhalten der Handler steckt nicht in einer Basisklasse, sondern in Middleware-Funktionen in [middleware.go](../internal/httpapi/middleware.go) und in kleinen Hilfsfunktionen wie `writeJSON` und `pathID` in [httpapi.go](../internal/httpapi/httpapi.go).
+**Interfaces auf Vorrat, beim Produzenten.** Ein `StoreInterface` mit zwanzig Methoden beim Anbieter koppelt jeden Verbraucher an alle Methoden. Weil Go-Interfaces implizit erfüllt werden, definiert der Verbraucher, was er braucht: Der Scheduler kennt ein `Store` mit zwei Methoden, die API ein eigenes mit sechs, und die Fakes in den Tests sind entsprechend kurz ([Teil 04](04-go-denkweise.md), [Teil 09](09-projektstruktur.md)).
 
-## Interfaces auf Vorrat, beim Produzenten
-
-**Was man sieht:** Das Package `sqlitestore` exportiert ein `StoreInterface` mit zwanzig Methoden, und jeder Verbraucher hängt davon ab.
-
-**Warum es nicht passt:** Ein großes Interface beim Anbieter koppelt jeden Verbraucher an alle Methoden, auch an die, die er nie aufruft. Für einen Test muss man dann zwanzig Methoden faken. In Java und C# ist das trotzdem üblich, weil eine Klasse ein Interface ausdrücklich implementieren muss und es deshalb beim Anbieter stehen muss. In Go muss es das nicht.
-
-**Idiomatisch:** Der Verbraucher definiert das Interface mit genau den Methoden, die er braucht. [scheduler.go](../internal/scheduler/scheduler.go) definiert `Store` mit zwei Methoden (`ClaimDue`, `SaveResult`) und `Checker` mit einer. [httpapi.go](../internal/httpapi/httpapi.go) definiert ein eigenes `Store` mit den sechs Methoden, die die API braucht. `sqlitestore.Store` erfüllt beide, ohne eines davon zu kennen. Die Fakes in [scheduler_test.go](../internal/scheduler/scheduler_test.go) sind dadurch ein paar Zeilen lang.
-
-## Getter und Setter für alles
-
-**Was man sieht:**
-
-```go
-func (t *Target) GetURL() string      { return t.url }
-func (t *Target) SetURL(url string)   { t.url = url }
-func (t *Target) GetInterval() time.Duration { return t.interval }
-```
-
-**Warum es nicht passt:** Properties in C# und Getter in Java sind dort auch deshalb Konvention, weil man später Logik einbauen kann, ohne die Schnittstelle zu brechen. In Go sind die meisten Typen Daten, die man nicht kapseln muss, und die Kapselung findet ohnehin am Package statt, nicht an der Klasse. Wenn ein Getter nötig ist, heißt er in Go `URL()`, nicht `GetURL()`.
-
-**Idiomatisch:** `monitor.Target` und `monitor.Result` in [monitor.go](../internal/monitor/monitor.go) haben exportierte Felder. Wo es echte Logik gibt, gibt es eine Methode: `Result.Up()` entscheidet, ob ein Check als erfolgreich zählt. Invarianten sichert der Konstruktor `NewTarget`, der die Eingabe validiert, nicht ein Setter.
-
-## Exceptions mit panic nachbauen
-
-**Was man sieht:** `panic(err)` tief in einer Funktion und ein `recover` weiter oben, das daraus wieder einen Fehler macht – ein selbstgebautes `try`/`catch`. Oder Hilfsfunktionen wie `must(err)`, die überall aufgerufen werden.
-
-**Warum es nicht passt:** In Go ist ein Fehler ein Rückgabewert, und an der Signatur `(T, error)` sieht jeder Leser, dass etwas schiefgehen kann. Ein Panic springt über alle Aufrufer hinweg, an denen niemand mit ihm rechnet, und Ressourcen, die nicht per `defer` freigegeben werden, bleiben liegen. Panic ist für Programmierfehler gedacht, für Zustände, die nicht eintreten dürfen.
-
-**Idiomatisch:** upwatch gibt Fehler zurück und reichert sie mit `fmt.Errorf("…: %w", err)` an ([Teil 05](05-fehlerbehandlung.md)). Fehlerarten, auf die jemand reagieren muss, sind Werte (`monitor.ErrNotFound`, `monitor.ErrDuplicate`) oder Typen (`*monitor.ValidationError`), und `handleError` in [httpapi.go](../internal/httpapi/httpapi.go) übersetzt sie an genau einer Stelle in HTTP-Statuscodes. Selbst `main` bricht nicht mittendrin ab: `run()` gibt einen Fehler zurück, und erst `main` ruft `os.Exit(1)` auf, damit alle `defer` laufen. Das einzige `recover` steht in `recoverPanics` als Sicherheitsnetz für echte Programmierfehler in Handlern – nicht als Kontrollfluss.
+**Getter und Setter für alles.** `func (t *Target) GetURL() string { return t.url }` ist in Go meist Zeremonie. Ein Getter setzt ein unexportiertes Feld voraus (`url`, klein geschrieben, außerhalb des Packages unsichtbar); `monitor.Target` exportiert seine Felder stattdessen (`URL`, groß geschrieben), und Invarianten sichert der Konstruktor `NewTarget`, nicht ein Setter. Wo es echte Logik gibt, gibt es eine Methode wie `Result.Up()`. Braucht man doch einen Getter, heißt er `URL()`, nicht `GetURL()`.
 
 ## Context in Structs
 
@@ -57,17 +44,19 @@ type Scheduler struct {
 }
 ```
 
-**Warum es nicht passt:** Ein Context gehört zu einem Aufruf: diese Anfrage, dieser Lauf, mit dieser Deadline. In einem Struct gespeichert, gilt er plötzlich für alle Methoden und jede Lebensdauer des Objekts, und niemand sieht beim Aufruf, welche Deadline oder welcher Abbruch gerade greift. Das Package `context` sagt das ausdrücklich in seiner Dokumentation.
+In C# ist das der `CancellationToken`, den man im Konstruktor entgegennimmt und in einem Feld ablegt; in Java der Request-Scope, der an einem Objekt hängt.
 
-**Idiomatisch:** Context ist der erste Parameter jeder Funktion, die blockieren kann. `Scheduler.Run(ctx)`, `Checker.Check(ctx, target)`, alle Methoden von `sqlitestore.Store`. Wo eine Arbeit den Abbruch überleben soll, macht der Code das sichtbar: Der Writer im Scheduler speichert Ergebnisse während des Shutdowns mit `context.WithoutCancel(ctx)` ([Teil 07](07-context.md)).
+**Warum es nicht passt:** Ein Context gehört zu einem Aufruf: diese Anfrage, dieser Lauf, mit dieser Deadline. In einem Struct gespeichert, gilt er plötzlich für alle Methoden und die ganze Lebensdauer des Objekts, und niemand sieht beim Aufruf, welche Deadline oder welcher Abbruch gerade greift. Die Dokumentation von `context` sagt das ausdrücklich.
+
+**Idiomatisch:** Context ist der erste Parameter jeder Funktion, die blockieren kann: `Scheduler.Run(ctx)`, `Checker.Check(ctx, target)`, alle Methoden von `sqlitestore.Store`. Wo eine Arbeit den Abbruch überleben soll, macht der Code das sichtbar: Der Writer im Scheduler speichert Ergebnisse während des Shutdowns mit `context.WithoutCancel(ctx)` ([Teil 07](07-context.md)).
 
 ## Goroutines ohne Ende
 
 **Was man sieht:** `go doSomething()` an beliebigen Stellen, ohne dass klar ist, wann die Goroutine endet und wer darauf wartet.
 
-**Warum es nicht passt:** Eine Goroutine ist billig zu starten, aber sie gehört niemandem. Läuft sie unbegrenzt weiter, hält sie Speicher und alles, worauf sie verweist; schreibt sie nach dem Shutdown noch in eine geschlossene Datenbank, gibt es Fehler, die nur manchmal auftreten. In C# hält der Task wenigstens ein Objekt, auf das man warten kann, in TypeScript eine Promise. In Go gibt es nichts dergleichen, wenn man es nicht selbst baut.
+**Warum es nicht passt:** Eine Goroutine ist billig zu starten, aber sie gehört niemandem. Läuft sie unbegrenzt weiter, hält sie Speicher und alles, worauf sie verweist; schreibt sie nach dem Shutdown noch in eine geschlossene Datenbank, gibt es Fehler, die nur manchmal auftreten. In C# hält ein `Task` wenigstens ein Objekt, auf das man warten kann, in TypeScript eine Promise. Ein `go`-Aufruf gibt nichts zurück – kein Handle, kein Ergebnis, keinen Fehler. Alles davon muss man selbst bauen.
 
-**Idiomatisch:** Für jede Goroutine ist klar, wie sie endet und wer auf sie wartet. Im [Scheduler](../internal/scheduler/scheduler.go) startet `Run` die Worker mit `WaitGroup.Go`, schließt beim Shutdown erst `jobs`, wartet auf die Worker, schließt dann `results` und wartet auf den Writer. In [main.go](../cmd/upwatch/main.go) wartet `run` mit `wg.Wait()` auf den Scheduler, bevor es zurückkehrt. Die eine Goroutine ohne geordnetes Ende ist `serveDebug`: Der Debug-Listener läuft, bis der Prozess endet. Das ist eine bewusste Vereinfachung für ein Werkzeug, das nur lokal benutzt wird – und genau so eine Ausnahme sollte man begründen können.
+**Idiomatisch:** Für jede Goroutine ist klar, wie sie endet und wer auf sie wartet. Im [Scheduler](../internal/scheduler/scheduler.go) startet `Run` die Worker mit `WaitGroup.Go`, schließt beim Shutdown erst `jobs`, wartet auf die Worker, schließt dann `results` und wartet auf den Writer. In [main.go](../cmd/upwatch/main.go) wartet `run` mit `wg.Wait()` auf den Scheduler, bevor es zurückkehrt. Die eine Goroutine ohne geordnetes Ende ist `serveDebug`: Der Debug-Listener läuft, bis der Prozess endet – eine Vereinfachung für ein Werkzeug, das nur lokal benutzt wird, und genau so eine Ausnahme sollte man begründen können.
 
 ## Pointer überall „aus Performance-Gründen“
 
@@ -75,49 +64,84 @@ type Scheduler struct {
 
 **Warum es nicht passt:** Die Intuition aus Java und C#, dass Objekte Referenzen sind und Kopieren teuer ist, stimmt in Go nicht pauschal. Ein Struct mit ein paar Feldern zu kopieren ist billig. Ein Pointer dagegen führt oft dazu, dass der Wert auf den Heap muss ([Teil 14](14-performance.md)), und er macht beim Lesen unklar, ob die Funktion den Wert ändert. Ein `nil`-Pointer ist außerdem ein Zustand, den man sonst nicht hätte.
 
-**Idiomatisch:** Werte, solange es keinen Grund für einen Pointer gibt. `Checker.Check` nimmt `monitor.Target` als Wert und gibt `monitor.Result` als Wert zurück; die Store-Methoden geben `[]monitor.Target` zurück, keine `[]*monitor.Target`. Pointer gibt es dort, wo sie etwas bedeuten: `*Checker`, `*Scheduler` und `*sqlitestore.Store` haben Zustand (einen HTTP-Client, einen Connection Pool), der nicht kopiert werden soll, und `*monitor.ValidationError` ist ein Pointer, weil Fehler als Pointer-Typen üblich sind und `errors.As` damit arbeitet. Die Entscheidung ist semantisch – „soll das geteilt oder kopiert werden?“ –, nicht eine Performance-Vermutung.
+**Idiomatisch:** Werte, solange es keinen Grund für einen Pointer gibt. `Checker.Check` nimmt `monitor.Target` als Wert und gibt `monitor.Result` als Wert zurück; die Store-Methoden geben `[]monitor.Target` zurück, keine `[]*monitor.Target`. Pointer gibt es dort, wo sie etwas bedeuten: `*Checker`, `*Scheduler` und `*sqlitestore.Store` haben Zustand (einen HTTP-Client, einen Connection Pool), der nicht kopiert werden soll, und `*monitor.ValidationError` ist ein Pointer, weil Fehlertypen üblicherweise als Pointer implementiert werden und `errors.As` damit arbeitet. Die Entscheidung ist semantisch – „soll das geteilt oder kopiert werden?“ –, nicht eine Performance-Vermutung.
 
 ## init()-Magie und globale Variablen
 
-**Was man sieht:** `func init()`, das Konfiguration liest, eine Datenbankverbindung öffnet oder sich in einer globalen Registry anmeldet. Package-Variablen wie `var DB *sql.DB` oder `var Logger = …`, auf die jede Funktion zugreift.
+**Was man sieht:** `func init()`, das Konfiguration liest, eine Datenbankverbindung öffnet oder sich in einer globalen Registry anmeldet. Package-Variablen wie `var DB *sql.DB` oder `var Logger = …`, auf die jede Funktion zugreift. Aus Java kennt man das als `static`-Initialisierer, aus .NET als statischen Konstruktor.
 
-**Warum es nicht passt:** `init` läuft beim Import, in einer Reihenfolge, die man nicht am Aufruf sieht, und kann keinen Fehler zurückgeben. Globale Variablen sind versteckte Abhängigkeiten: Eine Funktion, die `DB` benutzt, sieht von außen aus wie eine, die keine Datenbank braucht, und zwei Tests, die `DB` unterschiedlich setzen, können nicht parallel laufen. Das ist das Service-Locator-Problem, das man auch aus .NET und Java kennt, nur ohne Container.
+**Warum es nicht passt:** `init` läuft beim Import, in einer Reihenfolge, die man nicht am Aufruf sieht, und kann keinen Fehler zurückgeben. Globale Variablen sind versteckte Abhängigkeiten: Eine Funktion, die `DB` benutzt, sieht von außen aus wie eine, die keine Datenbank braucht, und zwei Tests, die `DB` unterschiedlich setzen, können nicht parallel laufen. Das ist das Service-Locator-Problem aus .NET und Java, nur ohne Container.
 
 **Idiomatisch:** upwatch hat kein einziges eigenes `init`. Abhängigkeiten werden in `run` in [main.go](../cmd/upwatch/main.go) erzeugt und als Parameter weitergegeben. `config.Load` bekommt sogar die Funktion zum Lesen der Umgebung übergeben (`Load(getenv func(string) string)`), damit Tests keine echten Umgebungsvariablen setzen müssen. Die Package-Variablen, die es gibt, haben einen Grund: Sentinel-Fehler wie `monitor.ErrNotFound` und `check.ErrForbiddenAddress` sind unveränderliche Werte, `migrations` ist ein `embed.FS`, `version` setzt der Linker. Die expvar-Zähler im Scheduler sind globale Variablen, weil expvar eine globale Registry ist – eine Grenze des Packages, die man hinnimmt, statt sie zu verstecken. `slog.SetDefault` in `main` setzt zwar einen globalen Logger, aber die Packages bekommen ihren Logger trotzdem explizit übergeben.
 
 Die anerkannte Ausnahme vom `init`-Verbot sind Treiber für `database/sql`: `modernc.org/sqlite` registriert sich beim Import unter dem Namen `"sqlite"`. Das ist ein Muster der Standardbibliothek, nicht eines, das man für eigenen Code übernehmen sollte.
 
-## util-Packages
+## Kurz: Exceptions, util-Packages, Generics, Frameworks
 
-**Was man sieht:** `pkg/util`, `common`, `helpers`, `shared` – ein Package mit `StringUtils`, `HTTPHelpers` und `DateFormat`, das jedes andere Package importiert.
+**Exceptions mit panic nachbauen.** `panic(err)` tief unten und ein `recover` weiter oben ist ein selbstgebautes `try`/`catch`, das an keiner Signatur zu sehen ist. upwatch gibt Fehler zurück, reichert sie mit `%w` an und übersetzt sie an genau einer Stelle, `handleError`, in Statuscodes ([Teil 05](05-fehlerbehandlung.md)). Das einzige `recover` steht in `recoverPanics` als Sicherheitsnetz für echte Programmierfehler in Handlern.
 
-**Warum es nicht passt:** Der Package-Name ist in Go Teil jedes Aufrufs. `util.Validate(x)` sagt nichts darüber, was validiert wird. Solche Packages wachsen unbegrenzt, weil alles hineinpasst, und weil jeder sie importiert, werden sie zum Knoten im Abhängigkeitsgraph, der Importzyklen erzeugt.
+**util-Packages.** Der Package-Name ist Teil jedes Aufrufs, und `util.Validate(x)` sagt nichts. Solche Packages wachsen unbegrenzt und werden zum Knoten im Abhängigkeitsgraph. In upwatch lebt jede Hilfsfunktion neben ihrem Verbraucher: `isPublic` in `check`, `writeJSON` und `pathID` in `httpapi`, `scanTarget` in `sqlitestore` ([Teil 09](09-projektstruktur.md)).
 
-**Idiomatisch:** Eine Hilfsfunktion lebt neben dem Code, der sie braucht. `isPublic` steht in `check`, weil nur der Checker sie braucht. `writeJSON`, `writeError` und `pathID` stehen in `httpapi`. `scanTarget` steht in `sqlitestore`. Wenn eine Funktion wirklich von mehreren Packages gebraucht wird, bekommt sie ein Package mit einem Namen, der sagt, was es tut. Und ein bisschen Kopieren ist oft besser als eine neue Abhängigkeit.
+**Generics zu früh.** Ein `Repository[T]` verdeckt, dass Targets und Results ganz unterschiedliche Abfragen brauchen, und ein `Result[T]` konkurriert mit `(T, error)`, das jede Go-Bibliothek nutzt. upwatch definiert keinen generischen Typ und vermisst keinen; wo Generics glänzen, liefert die Standardbibliothek sie fertig (`slices`, `maps`, `atomic.Pointer[T]`). Faustregel: Wenn du dieselbe Funktion zum dritten Mal für einen anderen Typ schreibst, denk über einen Typparameter nach.
 
-## Generics zu früh
-
-**Was man sieht:** `type Repository[T any] interface { Get(id int64) (T, error); … }`, `Result[T]`- und `Option[T]`-Typen aus der funktionalen Welt, generische Hilfsfunktionen für jeden Slice-Durchlauf.
-
-**Warum es nicht passt:** Generics sind seit Go 1.18 da und für Datenstrukturen und Algorithmen sehr nützlich. Für Domänencode sind sie meist eine Abstraktion ohne zweiten Anwendungsfall. Ein generisches Repository verdeckt, dass Targets und Results ganz unterschiedliche Abfragen brauchen. Ein `Result[T]` konkurriert mit dem `(T, error)`-Muster, das jede Go-Bibliothek nutzt.
-
-**Idiomatisch:** upwatch definiert keinen einzigen generischen Typ und keine generische Funktion, und es fehlt nichts. Wo Generics in Go glänzen, liefert die Standardbibliothek sie fertig: `slices` und `maps` für die üblichen Operationen auf Slices und Maps, `atomic.Pointer[T]` und ähnliche Typen für nebenläufigen Code. Die Faustregel: Schreib die konkrete Version, und wenn du dieselbe Funktion zum dritten Mal für einen anderen Typ schreibst, denk über einen Typparameter nach.
-
-## Frameworks zuerst
-
-**Was man sieht:** Ein neues Projekt beginnt mit der Auswahl von Web-Framework, ORM, DI-Container, Konfigurations-Bibliothek und Logging-Framework, bevor die erste Route existiert.
-
-**Warum es nicht passt:** In .NET und Spring ist das Framework die Plattform. In Node.js liefert die Laufzeit wenig, und Express oder NestJS füllen die Lücke. In Go deckt die Standardbibliothek den Großteil dessen ab, was ein kleiner Server braucht, und jedes Framework bringt eigene Konzepte mit, die neben denen der Standardbibliothek stehen (eigene Context-Typen, eigene Handler-Signaturen, eigene Middleware).
-
-**Idiomatisch:** upwatch hat genau eine direkte Abhängigkeit in [go.mod](../go.mod): den SQLite-Treiber. Routing mit Methoden und Pfadparametern macht `http.ServeMux` (seit Go 1.22), JSON `encoding/json`, Datenbankzugriff `database/sql`, Logging `log/slog`, Metriken `expvar`, Profiling `net/http/pprof`, Tests `testing` und `httptest`. Das heißt nicht, dass Bibliotheken schlecht sind. Ein Treiber für PostgreSQL (`pgx`), ein Code-Generator wie `sqlc` oder ein Router mit mehr Funktionen kann sich lohnen – wenn ein konkretes Problem ihn verlangt, nicht weil man es aus einem anderen Ökosystem gewohnt ist.
+**Frameworks zuerst.** In .NET und Spring ist das Framework die Plattform, in Node.js füllen Express oder NestJS eine Lücke der Laufzeit. In Go deckt die Standardbibliothek den Großteil dessen ab, was ein kleiner Server braucht: Routing mit Methoden und Pfadparametern (`http.ServeMux`, seit Go 1.22), JSON, `database/sql`, `log/slog`, `expvar`, `net/http/pprof`, `testing` und `httptest`. upwatch hat genau eine direkte Abhängigkeit, den SQLite-Treiber. Ein Treiber wie `pgx`, ein Code-Generator wie `sqlc` oder ein Router mit mehr Funktionen kann sich lohnen – wenn ein konkretes Problem ihn verlangt.
 
 ## Was du gebaut hast
 
-In sechzehn Teilen ist ein vollständiger Dienst entstanden. upwatch nimmt URLs über eine JSON-API an, validiert sie, speichert sie in SQLite und prüft sie mit einem Pool von Workern in festen Abständen. Es misst Statuscode und Antwortzeit, unterscheidet zwischen „Ziel ist down“ und „Check wurde abgebrochen“, schützt sich gegen SSRF und gegen langsame oder übergroße Requests, loggt strukturiert, stellt Metriken und Profile auf einem separaten Port bereit, beendet sich auf Signal geordnet und kommt als ein statisches Binary von etwa 12 MB, das als systemd-Dienst oder in einem Container ohne Shell läuft. Getestet ist das mit Tabellentests, Fuzzing, `httptest` gegen eine echte Datenbank und `testing/synctest` für die zeitabhängigen Teile.
+In sechzehn Teilen ist ein vollständiger Dienst entstanden. So sieht er im Betrieb aus, die Anwendung aus Teil 01 mit der Produktionsschicht aus Teil 15:
 
-Das alles mit einer einzigen externen Abhängigkeit und ohne Framework.
+```text
+                        Internet (HTTPS)
+                               │
+                 ┌─────────────▼──────────────┐
+                 │ Reverse Proxy: TLS, HSTS   │  Teil 15
+                 └─────────────┬──────────────┘
+                               │ HTTP 127.0.0.1:8080
+┌──────────────────────────────▼───────────────────────────────────┐
+│ upwatch: ein statisches Binary, nonroot/DynamicUser      Teil 15 │
+│ main: Config, slog, Signale, Graceful Shutdown           Teil 12 │
+│                                                                  │
+│  ┌────────────────────────┐          ┌────────────────────────┐  │
+│  │ HTTP-API       Teil 08 │          │ Scheduler      Teil 06 │  │
+│  │ Timeouts, Limits    13 │          │ Worker, Channels,      │  │
+│  │ /healthz, /readyz   12 │          │ Context        Teil 07 │  │
+│  └───────────┬────────────┘          └─────┬────────────┬─────┘  │
+│              │ Targets          ClaimDue,  │            │ Jobs   │
+│              │ lesen/schreiben  SaveResult │            ▼        │
+│              │   ┌─────────────────────┐   │    ┌──────────────┐ │
+│              └──►│ SQLite      Teil 10 │◄──┘    │ Checker      │─┼──► geprüfte URLs
+│                  │ Migrationen (embed) │        │ SSRF-Schutz  │ │
+│                  └──────────┬──────────┘        │ Teil 13      │ │
+│  Debug 127.0.0.1:6060       │                   └──────────────┘ │
+│  expvar, pprof  Teil 12, 14 │                                    │
+└─────────────────────────────┼────────────────────────────────────┘
+                              ▼
+               /var/lib/upwatch bzw. Volume /data
+```
 
-Das eigentliche Lernziel war aber nicht upwatch. Es war: So baut man mit Go eine kleine, schnelle und wartbare Serveranwendung – und versteht dabei, warum Go an einigen Stellen bewusst anders funktioniert als C# oder TypeScript. Fehler als Werte statt Exceptions, weil der Kontrollfluss sichtbar bleiben soll. Interfaces beim Verbraucher, weil sie implizit erfüllt werden. Context als Parameter, weil Abbruch und Deadlines zu einem Aufruf gehören. Goroutines und Channels statt `async`/`await`, weil blockierender Code in Go billig ist. Ein Binary statt Runtime plus Paketen, weil Deployment einfach sein soll. Keine dieser Entscheidungen ist kostenlos – Go-Code ist an manchen Stellen länger und expliziter als das Äquivalent in C# –, aber sie zielen alle auf dasselbe: Code, den jemand anders in einem Jahr ohne Vorwissen lesen und ändern kann.
+upwatch nimmt URLs über eine JSON-API an, validiert sie, speichert sie in SQLite und prüft sie mit einem Pool von Workern in festen Abständen. Es misst Statuscode und Antwortzeit und unterscheidet zwischen „Ziel ist down“ und „Check wurde abgebrochen“ – alles mit einer einzigen externen Abhängigkeit und ohne Framework.
+
+### Produktionsreif heißt in upwatch
+
+- Der HTTP-Server hat Timeouts für jede Phase und begrenzte Header ([Teil 13](13-security.md)).
+- Request-Bodies sind begrenzt, unbekannte JSON-Felder werden abgelehnt ([Teil 08](08-http-api.md), [Teil 13](13-security.md)).
+- Ausgehende Checks haben einen Timeout und können keine privaten Adressen erreichen ([Teil 13](13-security.md)).
+- Eingaben werden in der Domäne validiert, und Fuzzing hat die Validierung geprüft ([Teil 11](11-testing.md)).
+- SQL ist durchgehend parametrisiert, Migrationen stecken im Binary ([Teil 10](10-datenbanken.md)).
+- Ein Signal führt zu einem geordneten Shutdown mit Frist; der Scheduler speichert fertige Ergebnisse noch ([Teil 12](12-logging-konfiguration-observability.md), [Teil 06](06-concurrency.md)).
+- Liveness und Readiness sind getrennt ([Teil 12](12-logging-konfiguration-observability.md)); ein Readiness-Drain wäre der nächste Schritt für mehrere Instanzen ([Teil 15](15-deployment.md)).
+- Logs sind strukturiert und gehen als JSON nach stdout ([Teil 12](12-logging-konfiguration-observability.md)).
+- Fehlkonfiguration bricht den Start mit allen Fehlern auf einmal ab ([Teil 12](12-logging-konfiguration-observability.md)).
+- Metriken und Profile liegen auf einem separaten Listener nur für localhost ([Teil 12](12-logging-konfiguration-observability.md), [Teil 13](13-security.md), [Teil 14](14-performance.md)).
+- Der Prozess läuft ohne Root-Rechte: distroless und nonroot im Container, `DynamicUser` und Hardening unter systemd ([Teil 15](15-deployment.md)).
+- Das Binary ist statisch, für vier Plattformen gebaut und trägt seine Version ([Teil 15](15-deployment.md)).
+- Tests laufen mit Race Detector, zeitabhängiger Code mit `synctest`, und `govulncheck` prüft die Abhängigkeiten ([Teil 06](06-concurrency.md), [Teil 11](11-testing.md), [Teil 13](13-security.md)).
+
+Was fehlt, steht ebenso ehrlich da: Authentifizierung (Teil 13), mehr als eine Instanz (Teil 15) und Retention für alte Ergebnisse (unten).
+
+### Das eigentliche Lernziel
+
+Das Ziel war aber nicht upwatch, sondern: So baut man mit Go eine kleine, schnelle und wartbare Serveranwendung – und versteht dabei, warum Go an einigen Stellen bewusst anders funktioniert als C# oder TypeScript. Fehler als Werte statt Exceptions, weil der Kontrollfluss sichtbar bleiben soll. Interfaces beim Verbraucher, weil sie implizit erfüllt werden. Context als Parameter, weil Abbruch und Deadlines zu einem Aufruf gehören. Goroutines und Channels statt `async`/`await`, weil blockierender Code in Go billig ist. Ein Binary statt Runtime plus Paketen, weil Deployment einfach sein soll. Keine dieser Entscheidungen ist kostenlos – Go-Code ist an manchen Stellen länger und expliziter als das Äquivalent in C# –, aber sie zielen alle auf dasselbe: Code, den jemand anders in einem Jahr ohne Vorwissen lesen und ändern kann.
 
 ## Wie es weitergehen kann
 
@@ -156,10 +180,9 @@ Die offiziellen Quellen sind gut und reichen weit:
 
 ## Übungen
 
-1. Such dir ein Go-Projekt, das du selbst geschrieben hast oder bei der Arbeit pflegst, und geh es mit den Abschnitten dieses Kapitels durch. Notiere für jeden Fund, welches Muster aus welcher Sprache dahintersteckt.
-2. Schreib `httpapi` testweise auf ein großes `StoreInterface` beim Anbieter um, das alle Methoden von `sqlitestore.Store` enthält. Was ändert sich an den Tests in `httpapi_test.go`, insbesondere an `failingStore`? Mach die Änderung danach rückgängig.
-3. Gib `serveDebug` in [main.go](../cmd/upwatch/main.go) ein geordnetes Ende: Der Debug-Server soll beim Shutdown ebenfalls mit `Shutdown` beendet werden, und `run` soll auf ihn warten. Lohnt sich der zusätzliche Code?
-4. Wähl eine der Erweiterungen aus „Wie es weitergehen kann“ und setz sie um, inklusive Tests. Achte darauf, ob du ein neues Interface, ein neues Package oder eine neue Abhängigkeit brauchst – und begründe jede davon.
+1. **Aufwärmen:** Such dir ein Go-Projekt, das du selbst geschrieben hast oder bei der Arbeit pflegst, und geh es mit der Tabelle am Anfang dieses Kapitels durch. Notiere für jeden Fund, welches Muster aus welcher Sprache dahintersteckt.
+2. **Kern:** Schreib `httpapi` testweise auf ein großes `StoreInterface` beim Anbieter um, das alle Methoden von `sqlitestore.Store` enthält. Was ändert sich an den Tests in `httpapi_test.go`, insbesondere an `failingStore`? Mach die Änderung danach rückgängig.
+3. **Profi (empfohlen):** Wähl eine der Erweiterungen aus „Wie es weitergehen kann“ und setz sie um, inklusive Tests. Achte darauf, ob du ein neues Interface, ein neues Package oder eine neue Abhängigkeit brauchst – und begründe jede davon.
 
 ---
 

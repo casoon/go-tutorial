@@ -44,7 +44,8 @@ func (u User) Greeting() string {
 	return "Hello, " + u.Name
 }
 
-// Target is a URL to check, Result the outcome of one check.
+// Target is a URL to check, Result the outcome of one check. Both are
+// simplified example types, not upwatch's monitor.Target and monitor.Result.
 type Target struct {
 	URL      string
 	Interval time.Duration

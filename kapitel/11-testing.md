@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel schreibst du Tests im Go-Stil: table-driven, ohne Assertion- und Mock-Bibliothek, mit `httptest`, echten Datenbanken, einer Fake-Uhr für zeitabhängigen Code, Benchmarks, Fuzzing und Race Detector.
 
+> **upwatch in diesem Teil:** die Tests neben dem Code, etwa [monitor_test.go](../internal/monitor/monitor_test.go), [httpapi_test.go](../internal/httpapi/httpapi_test.go) und [scheduler_test.go](../internal/scheduler/scheduler_test.go)
+> **Voraussetzungen:** Teil 06 bis 10
+
 ## Der kleinste Test
 
 ```go
@@ -13,7 +16,7 @@ func TestAdd(t *testing.T) {
 }
 ```
 
-Mehr Infrastruktur braucht ein Go-Test nicht. Die Regeln sind kurz: Tests liegen in Dateien, die auf `_test.go` enden, direkt neben dem Code. Eine Testfunktion beginnt mit `Test`, gefolgt von einem Großbuchstaben, und nimmt ein `*testing.T`. `go test ./...` findet und startet alle. Es gibt kein Testprojekt, keinen Test-Runner als Abhängigkeit, keine Attribute wie `[Fact]` oder `@Test` und keine Konfigurationsdatei.
+Mehr Infrastruktur braucht ein Go-Test nicht. Die Regeln sind kurz: Tests liegen in Dateien, die auf `_test.go` enden, direkt neben dem Code. Eine Testfunktion beginnt mit `Test`, gefolgt von einem Großbuchstaben, und nimmt ein `*testing.T`. `go test ./...` findet und startet alle. Es gibt kein Testprojekt, keinen Test-Runner als Abhängigkeit wie xUnit, JUnit oder Jest, keine Attribute wie `[Fact]` oder `@Test` und keine Konfigurationsdatei.
 
 Die Testdateien gehören normalerweise zum selben Package wie der Code (`package monitor`) und sehen deshalb auch unexportierte Bezeichner. Alternativ kannst du `package monitor_test` schreiben; dann testest du nur die öffentliche API, wie ein externer Nutzer. upwatch nutzt durchgehend die erste Variante, weil etwa `httpapi_test.go` den unexportierten Typ `targetJSON` zum Dekodieren benutzt.
 
@@ -29,27 +32,15 @@ t.Errorf("NormalizeURL(%q) = %q, want %q", tt.in, got, tt.want)
 
 Erst der Aufruf mit Eingabe, dann das tatsächliche Ergebnis, dann das erwartete – in dieser Reihenfolge, mit „got“ vor „want“. Wer die Meldung liest, sieht, was aufgerufen wurde und was falsch ist, ohne in den Testcode zu schauen. `%q` setzt Strings in Anführungszeichen, damit Leerzeichen und leere Strings sichtbar sind.
 
-Für Vergleiche von Slices und Maps gibt es `slices.Equal` und `maps.Equal`, für beliebige Strukturen `reflect.DeepEqual`. Wenn du Diffs größerer Strukturen brauchst, ist `github.com/google/go-cmp` die verbreitete Ergänzung.
+Für Vergleiche von Slices und Maps gibt es `slices.Equal` und `maps.Equal`, für beliebige Strukturen `reflect.DeepEqual`. Wer aus Jest `expect(got).toEqual(want)` gewohnt ist, findet das nächste Gegenstück in `github.com/google/go-cmp`: `cmp.Diff(want, got)` liefert für zwei beliebige Werte einen lesbaren Diff oder einen leeren String, und ein normales `if` macht daraus die Prüfung: `if diff := cmp.Diff(want, got); diff != "" { t.Errorf("mismatch (-want +got):\n%s", diff) }`. upwatch braucht go-cmp nicht, weil seine Vergleiche flach sind; bei verschachtelten Structs ist es die verbreitete Ergänzung.
 
-**testify** (`github.com/stretchr/testify`) ist die bekannteste Assertion-Bibliothek für Go und in vielen Projekten zu finden. `assert.Equal(t, want, got)` ist kürzer als ein `if` mit `Errorf`, und wer aus Jest oder xUnit kommt, fühlt sich sofort zu Hause. Die Gegenargumente: eine Abhängigkeit für etwas, das die Sprache schon kann, generische Meldungen ohne den Aufruf-Kontext, und das Paket `testify/mock` verführt zu Mock-lastigen Tests. upwatch kommt ohne aus. Wenn dein Team testify benutzt, ist das kein Fehler – nur nicht nötig.
+**testify** (`github.com/stretchr/testify`) ist die bekannteste Assertion-Bibliothek für Go und in vielen Projekten zu finden. `assert.Equal(t, want, got)` ist kürzer als ein `if` mit `Errorf`, und wer aus Jest oder xUnit kommt, fühlt sich sofort zu Hause. Die Gegenargumente: eine Abhängigkeit für etwas, das die Sprache schon kann, generische Meldungen ohne den Aufruf-Kontext, und das Paket `testify/mock` verführt zu Mock-lastigen Tests. upwatch kommt ohne aus. Wenn dein Team testify benutzt, spricht nichts dagegen; nötig ist es nicht.
 
 ## Errorf oder Fatalf
 
 `t.Errorf` markiert den Test als fehlgeschlagen und läuft weiter. `t.Fatalf` markiert ihn als fehlgeschlagen und beendet ihn sofort (genauer: die aktuelle Goroutine des Tests über `runtime.Goexit`).
 
-Die Faustregel: `Fatal`, wenn der Rest des Tests ohne diese Bedingung keinen Sinn ergibt; sonst `Error`. Im Store-Test wird nach einem fehlgeschlagenen `Results` mit `Fatalf` abgebrochen, weil der nächste Zugriff `results[0]` sonst panicken würde. Danach werden zwei Eigenschaften desselben Ergebnisses mit `Errorf` geprüft, damit du beide Abweichungen auf einmal siehst:
-
-```go
-if len(results) != 2 {
-	t.Fatalf("len(results) = %d, want 2", len(results))
-}
-if want := base.Add(2 * time.Minute); !results[0].CheckedAt.Equal(want) {
-	t.Errorf("newest CheckedAt = %s, want %s", results[0].CheckedAt, want)
-}
-if results[0].Duration != 30*time.Millisecond {
-	t.Errorf("Duration = %s, want 30ms", results[0].Duration)
-}
-```
+Die Faustregel: `Fatal`, wenn der Rest des Tests ohne diese Bedingung keinen Sinn ergibt; sonst `Error`. Im Store-Test bricht `t.Fatalf` ab, wenn `len(results) != 2` ist, weil der nächste Zugriff auf `results[0]` sonst panicken würde. Danach prüfen zwei `t.Errorf` zwei Eigenschaften desselben Ergebnisses, damit du beide Abweichungen auf einmal siehst.
 
 Eine Einschränkung: `Fatal` darf nur aus der Goroutine des Tests aufgerufen werden, nicht aus einer Goroutine, die der Test selbst gestartet hat. Dort benutzt du `Error` oder schickst den Fehler über einen Channel zurück.
 
@@ -96,11 +87,9 @@ func TestNormalizeURL(t *testing.T) {
 }
 ```
 
-Die Tabelle ist eine Slice anonymer Structs. Einen neuen Fall hinzuzufügen ist eine Zeile, und beim Lesen siehst du alle Fälle auf einen Blick – Eingabe neben erwarteter Ausgabe. Das entspricht `[Theory]` mit `[InlineData]` in xUnit oder `test.each` in Jest, nur ohne Sonderkonstrukt: Es ist eine Schleife.
+Die Tabelle ist eine Slice anonymer Structs. Einen neuen Fall hinzuzufügen ist eine Zeile, und beim Lesen siehst du alle Fälle auf einen Blick – Eingabe neben erwarteter Ausgabe. Das entspricht `[Theory]` mit `[InlineData]` in xUnit, `@ParameterizedTest` in JUnit oder `test.each` in Jest, nur ohne Sonderkonstrukt: Es ist eine Schleife.
 
 Der Fehlerfall prüft nicht nur „irgendein Fehler“, sondern mit `errors.As` den Typ `*ValidationError`. Nur dieser Typ wird in der API zu einem 400; ein anderer Fehler wäre ein 500 und damit ein Bug.
-
-Seit Go 1.22 hat jede Schleifeniteration ihre eigene Variable `tt`. Das früher übliche `tt := tt` vor `t.Run` brauchst du nicht mehr.
 
 ### Subtests mit t.Run
 
@@ -108,15 +97,6 @@ Seit Go 1.22 hat jede Schleifeniteration ihre eigene Variable `tt`. Das früher 
 
 ```bash
 go test -run 'TestNormalizeURL/no_scheme' -v ./internal/monitor
-```
-
-```
-=== RUN   TestNormalizeURL
-=== RUN   TestNormalizeURL/no_scheme
---- PASS: TestNormalizeURL (0.00s)
-    --- PASS: TestNormalizeURL/no_scheme (0.00s)
-PASS
-ok  	github.com/casoon/go-tutorial/internal/monitor	0.205s
 ```
 
 Wenn ein Fall scheitert, sieht die Ausgabe so aus (ein absichtlich fehlerhaftes `Classify` in einem Testmodul):
@@ -148,14 +128,13 @@ tests := []struct {
 	{"list", "GET", "/targets", "", 200, `"url":"https://example.com"`},
 	{"get unknown", "GET", "/targets/99", "", 404, "not found"},
 	{"duplicate", "POST", "/targets", `{"url":"https://example.com"}`, 409, "already exists"},
-	{"unknown field", "POST", "/targets", `{"url":"https://a.de","admin":true}`, 400, "unknown field"},
 	// ...
 	{"delete", "DELETE", "/targets/1", "", 204, ""},
 	{"delete again", "DELETE", "/targets/1", "", 404, "not found"},
 }
 ```
 
-Das ist kompakt und deckt in 17 Zeilen das ganze Fehler-Mapping ab. Es hat aber eine Eigenschaft, die du kennen solltest: Die Fälle hängen voneinander ab. „delete again“ erwartet 404, weil „delete“ vorher gelaufen ist. Startest du ihn allein, schlägt er fehl:
+Das ist kompakt und deckt mit 17 Fällen das ganze Fehler-Mapping ab. Es hat aber eine Eigenschaft, die du kennen solltest: Die Fälle hängen voneinander ab. „delete again“ erwartet 404, weil „delete“ vorher gelaufen ist. Startest du ihn allein, schlägt er fehl:
 
 ```bash
 go test -run 'TestTargetsAPI/delete_again' ./internal/httpapi
@@ -190,51 +169,24 @@ func newStore(t *testing.T) *Store {
 
 Vier Bausteine stecken darin:
 
-**`t.Helper()`** markiert die Funktion als Hilfsfunktion. Schlägt darin ein `Fatalf` zu, zeigt die Meldung die Zeile im aufrufenden Test, nicht die Zeile in `newStore`. Ohne `Helper` würden alle Fehler auf dieselbe Zeile im Helper zeigen, und du wüsstest nicht, welcher Test betroffen ist.
+| Baustein | Wirkung |
+|---|---|
+| `t.Helper()` | Ein `Fatalf` in der Hilfsfunktion zeigt die Zeile im aufrufenden Test, nicht die in `newStore`. Sonst zeigten alle Fehler auf dieselbe Zeile im Helper. |
+| `t.TempDir()` | ein frisches Verzeichnis pro Test, das danach automatisch gelöscht wird – keine Abhängigkeiten zwischen Tests, keine Aufräumarbeit |
+| `t.Cleanup(f)` | läuft nach dem Test, auch wenn er fehlschlägt, mehrere in umgekehrter Reihenfolge. Anders als `defer` funktioniert es aus einer Hilfsfunktion heraus; ein `defer s.Close()` in `newStore` schlösse die Datenbank, bevor der Test sie benutzt. |
+| `t.Context()` (seit Go 1.24) | ein Context, der kurz vor den Cleanups abgebrochen wird; Goroutines, die daran hängen, enden mit dem Test |
 
-**`t.TempDir()`** gibt ein frisches Verzeichnis zurück, das nach dem Test automatisch gelöscht wird. Jeder Test bekommt seine eigene Datenbankdatei, also gibt es keine Abhängigkeiten zwischen Tests und keine Aufräumarbeit.
-
-**`t.Cleanup(f)`** registriert eine Funktion, die nach dem Test läuft, auch wenn er fehlschlägt. Mehrere Cleanups laufen in umgekehrter Reihenfolge, wie `defer`. Der Unterschied zu `defer`: `Cleanup` funktioniert auch aus einer Hilfsfunktion heraus. Ein `defer s.Close()` in `newStore` würde die Datenbank schließen, bevor der Test sie benutzt.
-
-**`t.Context()`** (seit Go 1.24) liefert einen Context, der kurz vor den Cleanup-Funktionen abgebrochen wird. Für alles, was einen Context braucht, ist er im Test die richtige Wahl statt `context.Background()`: Goroutinen, die daran hängen, enden mit dem Test.
-
-Das xUnit-Gegenstück wäre ein Konstruktor plus `IDisposable` oder eine Fixture-Klasse. In Go ist es eine Funktion, die du am Anfang des Tests aufrufst – explizit, ohne Lebenszyklus-Magie.
+Das Gegenstück wäre in xUnit ein Konstruktor plus `IDisposable`, in JUnit `@BeforeEach`, `@AfterEach` und `@TempDir`. In Go ist es eine Funktion, die du am Anfang des Tests aufrufst – explizit, ohne Lebenszyklus-Magie.
 
 ## httptest: echte HTTP-Server ohne Netzwerk-Setup
 
 `net/http/httptest` bietet zwei Werkzeuge.
 
-**`httptest.NewServer`** startet einen echten HTTP-Server auf einem freien Loopback-Port und gibt dir seine URL. Der API-Test benutzt das, um die komplette Handler-Kette mit Middleware zu testen, über echtes HTTP:
-
-```go
-func newServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	store, err := sqlitestore.Open(t.Context(), filepath.Join(t.TempDir(), "api.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(New(store, logger))
-	t.Cleanup(srv.Close)
-	return srv
-}
-```
+**`httptest.NewServer`** startet einen echten HTTP-Server auf einem freien Loopback-Port und gibt dir seine URL. Der API-Test baut sich damit in einer Hilfsfunktion `newServer` nach dem Muster von `newStore` einen Server mit echter SQLite-Datenbank und kompletter Middleware-Kette und registriert `srv.Close` per `t.Cleanup`.
 
 Der Check-Test in [check_test.go](../internal/check/check_test.go) dreht das um: Dort ist der Testserver das Ziel, das upwatch prüft. Jeder Tabellenfall bringt seinen eigenen Handler mit – einer antwortet 503, einer leitet um, einer ist absichtlich langsam, um den Timeout zu testen.
 
-**`httptest.NewRecorder`** ist ein `http.ResponseWriter`, der alles aufzeichnet. Damit rufst du einen Handler direkt wie eine Funktion auf, ganz ohne Netzwerk. Aus dem Beispiel zu diesem Kapitel:
-
-```go
-// serve calls h directly, without a network, and returns the recording.
-func serve(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-	return rec
-}
-```
+**`httptest.NewRecorder`** ist ein `http.ResponseWriter`, der alles aufzeichnet. Damit rufst du einen Handler direkt wie eine Funktion auf, ganz ohne Netzwerk: `h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))`, danach stehen Status, Header und Body in `rec`.
 
 `NewServer` ist näher an der Realität (Header-Verarbeitung, Verbindungsabbruch, Client-Timeouts), `NewRecorder` ist schneller und einfacher. Für Handler-Logik reicht der Recorder; sobald der HTTP-Client oder Middleware-Verhalten über echte Verbindungen eine Rolle spielt, nimm den Server.
 
@@ -251,14 +203,7 @@ type fakeStore struct {
 	saved   []monitor.Result
 }
 
-func (f *fakeStore) ClaimDue(_ context.Context, _ time.Time, limit int) ([]monitor.Target, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := min(limit, len(f.pending))
-	due := f.pending[:n]
-	f.pending = f.pending[n:]
-	return due, nil
-}
+// ClaimDue hands out up to limit pending targets, also under f.mu.
 
 func (f *fakeStore) SaveResult(_ context.Context, r monitor.Result) error {
 	f.mu.Lock()
@@ -272,17 +217,7 @@ Ein **Mock** prüft Interaktionen: „`SaveResult` wurde genau zehnmal mit diese
 
 Dass ein Fake in Go so billig ist, liegt an zwei Entscheidungen aus Teil 04 und Teil 09. Interfaces werden beim Konsumenten definiert und enthalten nur, was er braucht: `scheduler.Store` hat zwei Methoden, nicht dreißig. Und ein Typ erfüllt ein Interface implizit, also braucht `fakeStore` keine Deklaration und keinen Generator. In C# braucht man Moq oder NSubstitute oft, weil Interfaces breit sind und das Nachbauen mühsam wäre; in Java ist es Mockito, in TypeScript `jest.fn()`. In Go gibt es mit gomock und mockery ebenfalls Mock-Generatoren, aber bei kleinen Interfaces ist ein handgeschriebener Fake meist kürzer als die Mock-Konfiguration.
 
-Noch kleiner wird ein Fake, wenn das Interface nur eine Methode hat. Dann reicht ein Funktionstyp, wie `http.HandlerFunc` in der Standardbibliothek:
-
-```go
-// pingFunc turns a function into a Pinger: the smallest possible fake.
-type pingFunc func(context.Context) error
-
-func (f pingFunc) Ping(ctx context.Context) error { return f(ctx) }
-
-up := pingFunc(func(context.Context) error { return nil })
-down := pingFunc(func(context.Context) error { return errors.New("database is locked") })
-```
+Noch kleiner wird ein Fake, wenn das Interface nur eine Methode hat. Dann reicht ein Funktionstyp wie `http.HandlerFunc`: `type pingFunc func(context.Context) error` mit der Methode `func (f pingFunc) Ping(ctx context.Context) error { return f(ctx) }` macht im Beispiel zu diesem Kapitel aus jeder Funktion einen `Pinger`; ein Fake für „Datenbank weg“ ist dann eine Zeile.
 
 ### Der Embedding-Trick: failingStore
 
@@ -298,15 +233,11 @@ func (failingStore) Targets(context.Context) ([]monitor.Target, error) {
 }
 ```
 
-`failingStore` bettet das Interface `Store` ein. Dadurch hat der Typ alle sechs Methoden und erfüllt das Interface. Das eingebettete Feld ist aber `nil`. `Targets` ist überschrieben, jede andere Methode würde an das nil-Interface weiterleiten und panicken. Der Test `TestPanicBecomes500` nutzt genau das absichtlich: Er ruft `GET /targets/1` auf, `Target` ist nicht überschrieben, der Handler panickt, und die Recover-Middleware muss daraus ein 500 machen.
-
-Der Trick ist praktisch, hat aber einen Haken: Ruft der Code unter Test unerwartet eine andere Methode auf, merkst du es erst zur Laufzeit an einer Panic. Für gezielte Fehlerfälle ist das akzeptabel, für einen allgemeinen Fake nicht.
+`failingStore` bettet das Interface `Store` ein. Dadurch hat der Typ alle sechs Methoden und erfüllt das Interface. Das eingebettete Feld ist aber `nil`. `Targets` ist überschrieben, jede andere Methode würde an das nil-Interface weiterleiten und panicken. Der Test `TestPanicBecomes500` nutzt genau das absichtlich: Er ruft `GET /targets/1` auf, `Target` ist nicht überschrieben, der Handler panickt, und die Recover-Middleware muss daraus ein 500 machen. Der Haken des Tricks: Ruft der Code unter Test unerwartet eine andere Methode auf, merkst du es erst zur Laufzeit an einer Panic. Für gezielte Fehlerfälle ist das akzeptabel, für einen allgemeinen Fake nicht.
 
 ## Integrationstests gegen echte SQLite
 
-upwatch testet den Store nicht mit einem Fake, sondern gegen echte SQLite-Datenbanken. `newStore` legt für jeden Test eine Datei in `t.TempDir()` an, führt die Migrationen aus und schließt sie am Ende. Auch der API-Test läuft gegen echte SQLite.
-
-Das ist möglich, weil SQLite eingebettet ist: kein Server, kein Docker, keine Ports. Das Öffnen einer frischen Datenbank inklusive Migration dauert Millisekunden, und die ganze Store-Suite läuft in etwa einer Sekunde. Der Gewinn ist groß: Diese Tests prüfen das echte SQL, die echten Constraints (`UNIQUE`, `ON DELETE CASCADE`) und die echte Fehlerübersetzung. Ein Fake-Store hätte den Duplicate-Fehler nur nachgespielt.
+upwatch testet den Store nicht mit einem Fake, sondern gegen echte SQLite-Datenbanken. `newStore` legt für jeden Test eine Datei in `t.TempDir()` an, führt die Migrationen aus und schließt sie am Ende. Auch der API-Test läuft gegen echte SQLite. Das ist möglich, weil SQLite eingebettet ist: kein Server, kein Docker, keine Ports. Das Öffnen einer frischen Datenbank inklusive Migration dauert Millisekunden, und die ganze Store-Suite läuft in etwa einer Sekunde. Der Gewinn ist groß: Diese Tests prüfen das echte SQL, die echten Constraints (`UNIQUE`, `ON DELETE CASCADE`) und die echte Fehlerübersetzung. Ein Fake-Store hätte den Duplicate-Fehler nur nachgespielt.
 
 Bei PostgreSQL ist der Aufwand höher. Übliche Wege sind eine Test-Datenbank in CI, `testcontainers-go` für einen Container pro Testlauf, oder eine Datenbank pro Test mit Template-Datenbanken. Langsame Integrationstests kannst du mit `if testing.Short() { t.Skip(...) }` überspringbar machen; `go test -short` lässt sie dann aus.
 
@@ -355,22 +286,48 @@ func TestRunChecksAllTargets(t *testing.T) {
 
 `synctest.Test` führt die Funktion in einer **Bubble** aus. Alle Goroutinen, die darin gestartet werden – hier der Scheduler mit drei Workern, dem Writer und dem Dispatcher –, gehören dazu. Innerhalb der Bubble benutzt das `time`-Package eine **Fake-Uhr**, die bei Mitternacht UTC am 1. Januar 2000 beginnt. Diese Uhr steht still, solange irgendeine Goroutine in der Bubble noch arbeiten kann. Erst wenn alle „durably blocked“ sind – sie warten auf einen Channel der Bubble, auf `time.Sleep`, einen Timer oder eine `WaitGroup` –, springt die Uhr direkt zum nächsten Zeitpunkt, an dem etwas aufwacht.
 
-Für den Test heißt das: `fakeChecker` wartet per `time.After` 100 ms. Die drei Worker blockieren, die Uhr springt um 100 ms, die drei Checks sind fertig, die Ergebnisse gehen an den Writer, die nächsten drei Ziele werden verteilt. Nach drei Runden (300 ms) sind neun Ergebnisse gespeichert, das zehnte entsteht in der vierten Runde bei genau 400 ms. Der Test prüft deshalb bei 399 ms auf neun und bei 400 ms auf zehn – eine Präzision, die mit echter Zeit unmöglich wäre.
+Für den Test heißt das: `fakeChecker` wartet per `time.After` 100 ms. Die drei Worker blockieren, die Uhr springt um 100 ms, die drei Checks sind fertig, die Ergebnisse gehen an den Writer, die nächsten drei Ziele werden verteilt. Auf der virtuellen Zeitachse:
+
+```text
+virtuelle Zeit  0 ms       100 ms     200 ms     300 ms     400 ms
+                │          │          │          │          │
+Worker 1        ├─ Ziel 1 ─┼─ Ziel 4 ─┼─ Ziel 7 ─┼─ Ziel 10 ┤
+Worker 2        ├─ Ziel 2 ─┼─ Ziel 5 ─┼─ Ziel 8 ─┤
+Worker 3        ├─ Ziel 3 ─┼─ Ziel 6 ─┼─ Ziel 9 ─┤
+gespeichert     0          3          6          9          10
+                                                           ▲▲
+                                                     399 ms  400 ms
+```
+
+Nach drei Runden (300 ms) sind neun Ergebnisse gespeichert, das zehnte entsteht in der vierten Runde bei genau 400 ms. Welcher Worker Ziel 10 bekommt, ist zufällig; der Zeitpunkt nicht. Der Test prüft deshalb bei 399 ms auf neun und bei 400 ms auf zehn – eine Präzision, die mit echter Zeit unmöglich wäre.
 
 **`synctest.Wait()`** wartet, bis alle anderen Goroutinen der Bubble blockiert sind. Ohne diesen Aufruf könnte der Test den Zähler lesen, während der Writer gerade noch speichert. Mit ihm ist garantiert, dass alles, was bis zu diesem Zeitpunkt passieren konnte, auch passiert ist.
 
-Die Laufzeit des Tests ist dabei praktisch null:
-
-```
-=== RUN   TestRunChecksAllTargets
---- PASS: TestRunChecksAllTargets (0.00s)
-=== RUN   TestRunStopsOnCancel
---- PASS: TestRunStopsOnCancel (0.00s)
-```
+`go test -v` meldet für beide Scheduler-Tests eine Laufzeit von `0.00s`.
 
 Ein paar Regeln aus der Dokumentation, die in der Praxis zählen: Ein `sync.Mutex` zählt nicht als dauerhaft blockiert, Netzwerk-I/O auch nicht. Deshalb benutzt der Scheduler-Test einen Fake-Checker mit `time.After` statt eines `httptest.Server` – mit echtem Netzwerk in der Bubble würde die Uhr nicht zuverlässig weiterlaufen. Und Channels müssen innerhalb der Bubble erzeugt werden; der Scheduler erzeugt seine in `Run`, also passt das.
 
-Für C#-Entwickler: Das Gegenstück wäre ein `TimeProvider` mit `FakeTimeProvider`, das man in den Code hineinreichen muss. synctest braucht keine Änderung am Produktionscode – `scheduler.go` ruft ganz normal `time.NewTicker` auf.
+Das Gegenstück in C# wäre ein `TimeProvider` mit `FakeTimeProvider`, in Java eine `java.time.Clock`, die man in den Code hineinreichen muss. synctest braucht keine Änderung am Produktionscode – `scheduler.go` ruft ganz normal `time.NewTicker` auf.
+
+## Jetzt du: einen Test kaputt machen
+
+Wie wichtig `synctest.Wait()` ist, siehst du am schnellsten, wenn du es weglässt. Kommentiere in [scheduler_test.go](../internal/scheduler/scheduler_test.go) in `TestRunChecksAllTargets` beide Aufrufe von `synctest.Wait()` aus und starte den Test mehrmals:
+
+```bash
+go test -count=3 ./internal/scheduler
+```
+
+```text
+--- FAIL: TestRunChecksAllTargets (0.00s)
+    scheduler_test.go:90: after 400ms saved = 9, want 10
+--- FAIL: TestRunChecksAllTargets (0.00s)
+    scheduler_test.go:90: after 400ms saved = 9, want 10
+--- FAIL: TestRunChecksAllTargets (0.00s)
+    scheduler_test.go:90: after 400ms saved = 9, want 10
+FAIL
+```
+
+Lies die Meldung genau: Bei 400 ms ist der zehnte Check fertig, aber der Writer hat das Ergebnis noch nicht gespeichert, als der Test nachzählt. Ohne `Wait` liest der Test den Zustand mitten im Ablauf. Setze die beiden Zeilen wieder ein. Wer lieber den Fuzzer arbeiten sieht: `go test -run=^$ -fuzz=FuzzNormalizeURL -fuzztime=30s ./internal/monitor` läuft eine halbe Minute und zeigt alle drei Sekunden, wie viele Eingaben er ausprobiert hat – auf einem Apple-M-Rechner mit Go 1.27 rund 20 Millionen in 30 Sekunden, ohne Fund.
 
 ## Benchmarks mit b.Loop
 
@@ -390,16 +347,11 @@ func BenchmarkNormalizeURL(b *testing.B) {
 go test -run=^$ -bench=. -benchmem ./internal/monitor
 ```
 
-```
-goos: darwin
-goarch: arm64
-pkg: github.com/casoon/go-tutorial/internal/monitor
-cpu: Apple M4 Pro
+```text
 BenchmarkNormalizeURL-14    	 7994814	       153.7 ns/op	     192 B/op	       2 allocs/op
-PASS
 ```
 
-`-run=^$` schaltet die normalen Tests ab, `-bench=.` startet alle Benchmarks, `-benchmem` zeigt Speicher pro Aufruf. Gemessen auf einem Apple-M-Rechner mit Go 1.27: rund 150 ns und zwei Allokationen pro Aufruf. Die Zahl hinter dem Namen (`-14`) ist `GOMAXPROCS`. Einzelne Läufe schwanken; für Vorher-nachher-Vergleiche führt man mehrere Läufe mit `-count=10` aus und vergleicht sie mit `benchstat` (`golang.org/x/perf/cmd/benchstat`). Mehr dazu in Teil 14.
+`-run=^$` schaltet die normalen Tests ab, `-bench=.` startet alle Benchmarks, `-benchmem` zeigt Speicher pro Aufruf. Gemessen auf einem Apple-M-Rechner mit Go 1.27: rund 150 ns und zwei Allokationen pro Aufruf; `-14` ist `GOMAXPROCS`. Wie man Läufe mit `-count` und `benchstat` vergleicht, zeigt Teil 14.
 
 ## Fuzzing
 
@@ -470,46 +422,18 @@ Gute Fuzz-Eigenschaften sind: Idempotenz (wie hier), Round-Trips (`Parse(Format(
 
 ## Race Detector
 
-Der Race Detector instrumentiert jeden Speicherzugriff und meldet, wenn zwei Goroutinen ohne Synchronisation auf dieselbe Variable zugreifen und mindestens eine schreibt. Du aktivierst ihn mit einem Flag:
-
-```bash
-go test -race ./internal/...
-```
-
-```
-ok  	github.com/casoon/go-tutorial/internal/check	1.416s
-ok  	github.com/casoon/go-tutorial/internal/config	1.320s
-ok  	github.com/casoon/go-tutorial/internal/httpapi	1.464s
-ok  	github.com/casoon/go-tutorial/internal/monitor	1.212s
-ok  	github.com/casoon/go-tutorial/internal/scheduler	1.341s
-ok  	github.com/casoon/go-tutorial/internal/sqlitestore	1.434s
-```
-
-Er findet nur Races, die während des Laufs tatsächlich auftreten, und macht Programme langsamer und speicherhungriger. Deshalb läuft er in Tests und CI, nicht in Produktion. In upwatch ist `-race` Teil von `make test` und `make check`, und die CI-Pipeline führt es bei jedem Pull Request aus. Wie ein Race-Report aussieht und wie man ihn liest, zeigt Teil 06. Hier nur der Hinweis, warum `fakeStore` einen Mutex hat: Der Dispatcher ruft `ClaimDue`, der Writer `SaveResult` und der Test selbst `savedCount` auf – drei Goroutinen, dieselben Felder. Ohne Mutex würde `-race` den Test zu Recht scheitern lassen.
+`go test -race ./...` instrumentiert jeden Speicherzugriff und meldet Zugriffe ohne Synchronisation. In upwatch ist `-race` Teil von `make test` und `make check`; deshalb hat `fakeStore` einen Mutex, denn Dispatcher, Writer und Test greifen auf dieselben Felder zu. Wie ein Race-Report aussieht und wie man ihn liest, zeigt Teil 06.
 
 ## Coverage
 
-```bash
-go test -cover ./internal/...
-```
-
-```
-ok  	github.com/casoon/go-tutorial/internal/check	0.489s	coverage: 93.0% of statements
-ok  	github.com/casoon/go-tutorial/internal/config	0.379s	coverage: 92.3% of statements
-ok  	github.com/casoon/go-tutorial/internal/httpapi	0.413s	coverage: 91.1% of statements
-ok  	github.com/casoon/go-tutorial/internal/monitor	0.338s	coverage: 84.6% of statements
-ok  	github.com/casoon/go-tutorial/internal/scheduler	0.346s	coverage: 89.5% of statements
-ok  	github.com/casoon/go-tutorial/internal/sqlitestore	0.377s	coverage: 82.6% of statements
-```
-
-Für Details schreibst du ein Profil und wertest es aus:
+`go test -cover ./internal/...` zeigt die Abdeckung pro Package (in upwatch zwischen 82 und 93 %). Details liefert ein Profil:
 
 ```bash
 go test -coverprofile=cover.out ./internal/monitor
 go tool cover -func=cover.out
 ```
 
-```
+```text
 github.com/casoon/go-tutorial/internal/monitor/monitor.go:46:	Up		100.0%
 github.com/casoon/go-tutorial/internal/monitor/monitor.go:56:	Error		0.0%
 github.com/casoon/go-tutorial/internal/monitor/monitor.go:62:	NewTarget	87.5%
@@ -517,54 +441,11 @@ github.com/casoon/go-tutorial/internal/monitor/monitor.go:80:	NormalizeURL	87.5%
 total:								(statements)	84.6%
 ```
 
-`go tool cover -html=cover.out` öffnet den Quelltext im Browser, grün und rot eingefärbt. Die Zahlen sind ein Hinweis, kein Ziel. `ValidationError.Error` steht auf 0 %, weil die Tests den Fehlertyp prüfen, nicht den Text – das ist eine bewusste Entscheidung, keine Lücke. Interessanter ist die Frage, welche Zweige in `NormalizeURL` nicht abgedeckt sind; das HTML zeigt es sofort (der Zweig für zu lange URLs und der für nicht parsebare URLs).
+`go tool cover -html=cover.out` färbt den Quelltext im Browser grün und rot. Die Zahlen sind ein Hinweis, kein Ziel: `ValidationError.Error` steht auf 0 %, weil die Tests den Fehlertyp prüfen, nicht den Text. Interessanter ist, welche Zweige fehlen; in `NormalizeURL` sind es laut HTML der für zu lange und der für nicht parsebare URLs.
 
 ## Das Beispiel zu diesem Kapitel
 
-[beispiele/11-testing/uptime](../beispiele/11-testing/uptime/) enthält kleine Funktionen aus der Monitor-Domäne und eine Testdatei, die die Muster dieses Kapitels zeigt: `TestAdd`, Tabellentests für `Classify` und `ParseInterval`, `httptest.NewServer` für `Probe`, `httptest.NewRecorder` mit einem Funktions-Fake für `Readyz`, synctest für `WaitUntilUp`, einen Benchmark und einen Fuzz-Test mit Round-Trip-Eigenschaft.
-
-```bash
-go test -v ./beispiele/11-testing/uptime
-go test -run=^$ -bench=. -benchmem ./beispiele/11-testing/uptime
-go test -run=^$ -fuzz=FuzzParseInterval -fuzztime=5s ./beispiele/11-testing/uptime
-```
-
-Der synctest-Fall dort ist bewusst einfach. `WaitUntilUp` prüft jede Minute, ob ein Ziel erreichbar ist; der Test lässt es beim dritten Versuch gelingen und prüft, dass auf der Fake-Uhr exakt zwei Minuten vergangen sind:
-
-```go
-func TestWaitUntilUp(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		calls := 0
-		check := func(context.Context) bool {
-			calls++
-			return calls == 3 // up on the third attempt
-		}
-
-		start := time.Now()
-		attempts, err := WaitUntilUp(t.Context(), time.Minute, check)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if attempts != 3 {
-			t.Errorf("attempts = %d, want 3", attempts)
-		}
-		if elapsed := time.Since(start); elapsed != 2*time.Minute {
-			t.Errorf("elapsed = %s, want exactly 2m0s", elapsed)
-		}
-	})
-}
-```
-
-```
-=== RUN   TestWaitUntilUp
---- PASS: TestWaitUntilUp (0.00s)
-```
-
-Zwei Minuten Wartezeit, null Sekunden Laufzeit. Der Benchmark des Beispiels zeigt nebenbei, wie sich eine allokationsfreie Funktion darstellt:
-
-```
-BenchmarkParseInterval-14    	52976916	        22.64 ns/op	       0 B/op	       0 allocs/op
-```
+[beispiele/11-testing/uptime](../beispiele/11-testing/uptime/) zeigt alle Muster dieses Kapitels an kleinen Funktionen aus der Monitor-Domäne: Tabellentests, `httptest.NewServer` und `NewRecorder`, einen Funktions-Fake, synctest mit zwei Minuten virtueller Wartezeit, einen Benchmark und einen Fuzz-Test mit Round-Trip-Eigenschaft. Starte es mit `go test -v ./beispiele/11-testing/uptime`.
 
 ## Im Projekt
 
@@ -578,10 +459,10 @@ BenchmarkParseInterval-14    	52976916	        22.64 ns/op	       0 B/op	       
 
 ## Übungen
 
-1. Mach die Korrektur der Längenprüfung in `NormalizeURL` testweise rückgängig und starte `go test ./internal/monitor` – ohne `-fuzz`. Welcher Test schlägt fehl, und warum findet ihn ein normaler Testlauf? Schreib danach eine zweite Fuzz-Eigenschaft für `NormalizeURL`, etwa „das Ergebnis ist nie länger als `MaxURLLength`“ oder „das Ergebnis lässt sich mit `url.Parse` parsen und hat Schema http oder https“, und lass den Fuzzer eine Minute laufen.
-2. Ergänze `TestNormalizeURL` um `t.Parallel()` in Test und Subtests und prüfe mit `go test -race -count=5`, dass alles grün bleibt. Warum wäre dasselbe in `TestTargetsAPI` falsch?
-3. Schreib einen Scheduler-Test mit synctest, in dem `SaveResult` des Fakes einen Fehler zurückgibt. Prüfe, dass der Scheduler weiterläuft und alle Ergebnisse versucht zu speichern. Wie würdest du den expvar-Zähler `upwatch_save_failures_total` in diesem Test prüfen, und was ist daran problematisch?
-4. Ersetze in `httpapi_test.go` den `failingStore` testweise durch einen vollständigen Fake mit allen sechs Methoden. Vergleiche Länge und Aussagekraft beider Varianten.
+1. **Aufwärmen:** Ergänze `TestNormalizeURL` um zwei eigene Tabellenfälle, etwa eine URL mit Port und eine mit Query-String. Lass zuerst einen absichtlich falschen `want`-Wert stehen und prüfe, ob die Meldung ohne Blick in den Testcode verständlich ist.
+2. **Kern:** Mach die Korrektur der Längenprüfung in `NormalizeURL` testweise rückgängig und starte `go test ./internal/monitor` – ohne `-fuzz`. Welcher Test schlägt fehl, und warum findet ihn ein normaler Testlauf? Schreib danach eine zweite Fuzz-Eigenschaft, etwa „das Ergebnis ist nie länger als `MaxURLLength`“, und lass den Fuzzer eine Minute laufen.
+3. **Kern:** Ergänze `TestNormalizeURL` um `t.Parallel()` in Test und Subtests und prüfe mit `go test -race -count=5`, dass alles grün bleibt. Warum wäre dasselbe in `TestTargetsAPI` falsch?
+4. **Profi:** Schreib einen Scheduler-Test mit synctest, in dem `SaveResult` des Fakes einen Fehler zurückgibt. Prüfe, dass der Scheduler weiterläuft und alle Ergebnisse zu speichern versucht. Wie würdest du den expvar-Zähler `upwatch_save_failures_total` in diesem Test prüfen, und was ist daran problematisch?
 
 ---
 

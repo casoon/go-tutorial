@@ -25,7 +25,9 @@ Nutzer legen URLs an. upwatch prüft sie regelmäßig parallel und speichert Sta
    └─────────────────────────────────────────────────────┘
 ```
 
-Daran lassen sich fast alle Stärken von Go natürlich zeigen: HTTP-API → JSON → Datenbank → Goroutines → Channels → Context → Worker → Tests → Logging → Graceful Shutdown → Single Binary.
+## So arbeitest du mit diesem Tutorial
+
+Der Code von upwatch liegt fertig und getestet im Repository. Du schreibst ihn nicht Zeile für Zeile ab, sondern startest ihn in Teil 1 und lernst ihn danach Baustein für Baustein kennen: Die Teile 1–7 legen die Grundlagen an Beispielen aus upwatch, ab Teil 8 geht es Paket für Paket durch den echten Code. Jedes Kapitel hat einen kurzen „Jetzt du“-Moment zum Ausprobieren und Übungen in drei Stufen (Aufwärmen, Kern, Profi), in denen du upwatch veränderst und erweiterst. Zu fast jedem Kapitel gibt es lauffähige Beispiele unter [`beispiele/`](beispiele/).
 
 ## Inhalt
 
@@ -64,12 +66,21 @@ cd go-tutorial
 make run
 ```
 
-In einem zweiten Terminal:
+In einem zweiten Terminal legst du ein Ziel an und fragst ein paar Sekunden später die Ergebnisse ab:
 
 ```bash
-curl -s -d '{"url":"https://example.com","interval_seconds":30}' localhost:8080/targets
-curl -s localhost:8080/targets/1/results
+curl -X POST localhost:8080/targets \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","interval_seconds":10}'
+curl localhost:8080/targets/1/results
 ```
+
+```json
+{"id":1,"url":"https://example.com","interval_seconds":10,"created_at":"2026-10-10T20:27:55.634Z"}
+[{"id":1,"status_code":200,"duration_ms":173,"up":true,"checked_at":"2026-10-10T20:27:55.77Z"}]
+```
+
+Ab hier übernimmt [Teil 1](kapitel/01-warum-go.md).
 
 ## Aufbau des Repositorys
 

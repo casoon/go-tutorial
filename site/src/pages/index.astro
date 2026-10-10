@@ -10,6 +10,7 @@ import {
   Terminal,
 } from '@casoon/pages-theme/components';
 import Base from '@casoon/pages-theme/layouts/Base.astro';
+import Curriculum from '../components/Curriculum.astro';
 import { url } from '@casoon/pages-theme/url';
 // Recorded with scripts/hero-session.sh against the real service.
 import session from '../hero-session.ansi?raw';
@@ -47,6 +48,8 @@ curl -s :8080/targets/1/results`;
     ]}
   />
 
+  <Curriculum />
+
   <Features
     heading="Worum es geht"
     items={[
@@ -71,7 +74,7 @@ curl -s :8080/targets/1/results`;
 
   <Quickstart
     title="Loslegen"
-    lead="Du brauchst Go ab 1.26 und curl. Die Kapitel lesen sich hier oder direkt im Repository."
+    lead="Du brauchst Go ab 1.26 und curl. Der Code ist fertig und getestet: Du startest upwatch in Teil 1 und lernst es danach Baustein für Baustein kennen – mit einem „Jetzt du“ in jedem Kapitel und Übungen in drei Stufen."
     steps={[
       'Repository klonen und upwatch mit <code>make run</code> starten.',
       'Eine URL anlegen – der Scheduler prüft sie sofort und danach im Intervall.',

@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel kannst du mit `database/sql` sicher lesen und schreiben, verstehst, was der Connection Pool tut, setzt Transaktionen richtig ein und kannst einschätzen, wann sich sqlc oder ein ORM lohnt.
 
+> **upwatch in diesem Teil:** der SQLite-Store in [store.go](../internal/sqlitestore/store.go) mit dem Schema in [001_init.sql](../internal/sqlitestore/migrations/001_init.sql)
+> **Voraussetzungen:** Teil 05 und 07; für `ClaimDue` hilft Teil 06
+
 ## database/sql in drei Zeilen
 
 Go bringt eine Datenbankschnittstelle in der Standardbibliothek mit. Sie ist bewusst klein: Verbindungen verwalten, SQL ausführen, Ergebnisse in Variablen scannen. Kein Mapping auf Objekte, kein Query-Builder, keine Migrationen.
@@ -15,7 +18,17 @@ if err := row.Scan(&u.ID, &u.Name); err != nil {
 }
 ```
 
-Das ist näher an ADO.NET (`DbConnection`, `DbCommand`, `DbDataReader`) oder JDBC als an Entity Framework oder Prisma. Du schreibst SQL, übergibst Parameter über Platzhalter und liest die Spalten in der Reihenfolge des `SELECT` in Zeiger auf deine Variablen. `Scan` konvertiert dabei zwischen Datenbank- und Go-Typen und meldet einen Fehler, wenn das nicht geht – etwa `NULL` in einen `string`.
+Das ist näher an ADO.NET oder JDBC als an Entity Framework, Hibernate oder Prisma:
+
+| Aufgabe | C# | Java | Go |
+|---|---|---|---|
+| Pool | Pool hinter `DbConnection`, im Treiber versteckt | `DataSource`, etwa HikariCP | `*sql.DB` |
+| Abfrage | `DbCommand.ExecuteReaderAsync`, Dapper `QueryAsync<T>` | `PreparedStatement.executeQuery()` | `db.QueryContext` |
+| Zeilen lesen | `DbDataReader.Read()` | `ResultSet.next()`, `rs.getString(…)` | `rows.Next()`, `rows.Scan(&…)` |
+| aufräumen | `using` / `await using` | try-with-resources | `defer rows.Close()` |
+| Transaktion | `BeginTransaction()` plus `using` | `setAutoCommit(false)`, `commit()` / `rollback()` | `BeginTx` plus `defer tx.Rollback()` |
+
+Du schreibst SQL, übergibst Parameter über Platzhalter und liest die Spalten in der Reihenfolge des `SELECT` in Zeiger auf deine Variablen. `Scan` konvertiert dabei zwischen Datenbank- und Go-Typen und meldet einen Fehler, wenn das nicht geht – etwa `NULL` in einen `string`.
 
 Die Platzhaltersyntax hängt vom Treiber ab: SQLite und MySQL nehmen `?`, PostgreSQL nimmt `$1`, `$2`. `database/sql` selbst parst kein SQL, es reicht den Text an den Treiber durch.
 
@@ -83,12 +96,15 @@ Der DSN wird mit `url.Values` gebaut statt mit String-Verkettung, damit Sonderze
 
 Jede Einstellung hat einen Grund:
 
-- **`foreign_keys(1)`**: SQLite prüft Fremdschlüssel standardmäßig nicht. Ohne diese Einstellung würde das `ON DELETE CASCADE` in der Migration stillschweigend ignoriert.
-- **`journal_mode(WAL)`**: Im Write-Ahead-Log-Modus blockieren Leser den Schreiber nicht und umgekehrt. Ohne WAL sperrt ein Schreibvorgang die ganze Datei auch für Leser.
-- **`busy_timeout(5000)`**: Ist die Datenbank gerade von einer anderen Verbindung gesperrt, wartet SQLite bis zu fünf Sekunden, statt sofort mit `SQLITE_BUSY` abzubrechen.
-- **`_txlock=immediate`**: Eine SQLite-Transaktion beginnt standardmäßig „deferred“, also ohne Sperre. Die Schreibsperre wird erst beim ersten schreibenden Statement angefordert. Wenn zwei Transaktionen zuerst lesen und dann schreiben wollen, kann die zweite die Sperre nicht bekommen, und SQLite bricht sie mit `SQLITE_BUSY` ab – auch mit `busy_timeout`, weil Warten hier nicht hilft. Mit `immediate` holt sich `BEGIN` die Schreibsperre sofort; die zweite Transaktion wartet dann schon beim `BEGIN`, wo `busy_timeout` greift. `ClaimDue` ist genau so eine Lese-dann-Schreib-Transaktion.
+| Einstellung | Problem ohne sie | Wirkung |
+|---|---|---|
+| `foreign_keys(1)` | SQLite prüft Fremdschlüssel standardmäßig nicht; das `ON DELETE CASCADE` der Migration würde still ignoriert. | Fremdschlüssel werden geprüft, Löschen kaskadiert. |
+| `journal_mode(WAL)` | Ein Schreibvorgang sperrt die ganze Datei, auch für Leser. | Leser und Schreiber blockieren sich nicht gegenseitig. |
+| `busy_timeout(5000)` | Ist die Datenbank gerade gesperrt, bricht die Abfrage sofort mit `SQLITE_BUSY` ab. | SQLite wartet bis zu fünf Sekunden auf die Sperre. |
+| `_txlock=immediate` | Eine Transaktion holt die Schreibsperre erst beim ersten Schreiben. Wollen zwei Lese-dann-Schreib-Transaktionen gleichzeitig schreiben, bricht SQLite eine mit `SQLITE_BUSY` ab – Warten hilft dort nicht, `busy_timeout` greift also nicht. | `BEGIN` holt die Schreibsperre sofort; die zweite Transaktion wartet schon beim `BEGIN`, wo `busy_timeout` greift. `ClaimDue` ist genau so eine Transaktion. |
+| `SetMaxOpenConns(4)` | Mit unbegrenzt vielen Verbindungen warten mehr Schreiber auf dieselbe Sperre; mit einer einzigen würde ein laufender `ClaimDue` jede API-Anfrage blockieren. | Ein Schreiber, daneben parallele Leser dank WAL. Sind alle vier belegt, wartet die nächste Abfrage, bis eine frei wird oder ihr Context abläuft. |
 
-**Warum nur vier Verbindungen?** SQLite erlaubt immer nur einen Schreiber. Mehr Verbindungen bringen beim Schreiben nichts, sie würden nur länger auf dieselbe Sperre warten. Lesen dagegen läuft dank WAL parallel, deshalb ist eins zu wenig: Ein laufender `ClaimDue` würde sonst jede API-Anfrage blockieren. Vier ist ein kleiner, bewusst gewählter Wert für diese Last. Sind alle vier Verbindungen belegt, wartet die nächste Abfrage, bis eine frei wird – oder bis ihr Context abläuft. Bei PostgreSQL sähe die Rechnung anders aus: Dort begrenzt der Server die Verbindungszahl, und du richtest `SetMaxOpenConns` daran aus, wie viele Instanzen deines Dienstes laufen.
+Bei PostgreSQL sähe die Rechnung für den Pool anders aus: Dort begrenzt der Server die Verbindungszahl, und du richtest `SetMaxOpenConns` daran aus, wie viele Instanzen deines Dienstes laufen.
 
 `SetConnMaxIdleTime` schließt Verbindungen, die fünf Minuten unbenutzt waren. Daneben gibt es `SetMaxIdleConns` (Standard: 2) und `SetConnMaxLifetime`, das bei Datenbanken hinter Load Balancern oder mit Failover wichtig ist, damit Verbindungen regelmäßig neu aufgebaut werden.
 
@@ -96,13 +112,7 @@ Jede Einstellung hat einen Grund:
 
 Alle Methoden, die mit der Datenbank reden, gibt es in zwei Varianten: `Query` und `QueryContext`, `Exec` und `ExecContext`, `Begin` und `BeginTx`. Benutze immer die mit Context. upwatch tut das ausnahmslos.
 
-Der Grund ist derselbe wie in Teil 07: Bricht der Client einen HTTP-Request ab, wird `r.Context()` beendet, und eine laufende Abfrage mit diesem Context wird abgebrochen. Die Verbindung geht zurück in den Pool, statt für ein Ergebnis zu arbeiten, das niemand mehr liest. Ebenso begrenzt der Context die Wartezeit auf eine freie Verbindung, wenn der Pool voll ist. In `readyz` wird das genutzt, um den Ping auf eine Sekunde zu begrenzen:
-
-```go
-ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-defer cancel()
-if err := a.store.Ping(ctx); err != nil {
-```
+Der Grund ist derselbe wie in Teil 07: Bricht der Client einen HTTP-Request ab, wird `r.Context()` beendet, und eine laufende Abfrage mit diesem Context wird abgebrochen. Die Verbindung geht zurück in den Pool, statt für ein Ergebnis zu arbeiten, das niemand mehr liest. Ebenso begrenzt der Context die Wartezeit auf eine freie Verbindung, wenn der Pool voll ist. `/readyz` nutzt das, um den `Ping` auf eine Sekunde zu begrenzen (Teil 12).
 
 ## Eine Zeile lesen: QueryRow und ErrNoRows
 
@@ -161,11 +171,11 @@ func (s *Store) Targets(ctx context.Context) ([]monitor.Target, error) {
 
 Drei Details, die alle zählen:
 
-`defer rows.Close()` gibt die Verbindung an den Pool zurück. Solange `rows` offen ist, ist eine Verbindung belegt. Vergisst du `Close` in einem Fehlerpfad, verlierst du sie – bei einem Pool von vier Verbindungen hängt upwatch nach vier solchen Fehlern. `rows.Next` schließt zwar automatisch, wenn es das Ende erreicht, aber nicht, wenn du die Schleife vorher mit `return` verlässt.
+`defer rows.Close()` gibt die Verbindung an den Pool zurück – das Gegenstück zu `using` um einen `DbDataReader` oder zu try-with-resources um ein JDBC-`ResultSet`. Solange `rows` offen ist, ist eine Verbindung belegt. Vergisst du `Close` in einem Fehlerpfad, verlierst du sie – bei einem Pool von vier Verbindungen hängt upwatch nach vier solchen Fehlern. `rows.Next` schließt zwar automatisch, wenn es das Ende erreicht, aber nicht, wenn du die Schleife vorher mit `return` verlässt.
 
 `rows.Err()` nach der Schleife unterscheidet „alle Zeilen gelesen“ von „beim Lesen ist etwas schiefgegangen“. `rows.Next` gibt in beiden Fällen `false` zurück. Ohne diese Prüfung bekommst du bei einem abgebrochenen Context eine halbe Liste und hältst sie für vollständig.
 
-`targets := []monitor.Target{}` statt `var targets []monitor.Target`: Eine nil-Slice wird von `encoding/json` als `null` kodiert, eine leere als `[]`. Die API soll für „keine Ziele“ eine leere Liste liefern.
+`targets := []monitor.Target{}` statt `var targets []monitor.Target` sorgt dafür, dass die API für „keine Ziele“ `[]` statt `null` liefert; warum, steht in Teil 08.
 
 ## Schreiben und Constraint-Fehler
 
@@ -207,7 +217,21 @@ Statt `VALUES` steht hier ein `SELECT` auf die Zieltabelle. Wurde das Ziel gelö
 
 ## Transaktionen: ClaimDue
 
-Der Scheduler fragt alle paar Sekunden: Welche Ziele sind fällig? Die naive Lösung wäre ein `SELECT ... WHERE next_check_at <= now` und später, nach dem Check, ein `UPDATE`. Das hat einen Fehler: Dauert ein Check länger als ein Tick, findet der nächste Tick dasselbe Ziel noch einmal als fällig und startet einen zweiten Check. Deshalb heißt die Methode `ClaimDue` und nicht `SelectDue`: Sie wählt die fälligen Ziele aus **und** schiebt in derselben Transaktion deren nächsten Termin um ein Intervall nach vorn. Was zurückkommt, gehört diesem Aufrufer.
+Der Scheduler fragt alle paar Sekunden: Welche Ziele sind fällig? Die naive Lösung wäre ein `SELECT ... WHERE next_check_at <= now` und später, nach dem Check, ein `UPDATE`. Das hat einen Fehler: Dauert ein Check länger als ein Tick, findet der nächste Tick dasselbe Ziel noch einmal als fällig und startet einen zweiten Check. Mit einem Takt von fünf Sekunden und einem Check, der zwölf Sekunden braucht:
+
+```text
+ohne Claim: SELECT im Tick, UPDATE erst nach dem Check
+  0 s  Tick 1   SELECT → Ziel 7 fällig   ── Check A läuft ────────────► 12 s UPDATE
+  5 s  Tick 2   SELECT → Ziel 7 fällig   ── Check B läuft (doppelt) ──► 17 s UPDATE
+ 10 s  Tick 3   SELECT → Ziel 7 fällig   ── Check C läuft (dreifach) ─► 22 s UPDATE
+
+mit ClaimDue: SELECT und UPDATE in einer Transaktion
+  0 s  Tick 1   SELECT → Ziel 7 fällig, UPDATE next_check_at = 60 s ── Check läuft ─► 12 s
+  5 s  Tick 2   SELECT → nichts fällig
+ 10 s  Tick 3   SELECT → nichts fällig
+```
+
+Deshalb heißt die Methode `ClaimDue` und nicht `SelectDue`: Sie wählt die fälligen Ziele aus **und** schiebt in derselben Transaktion deren nächsten Termin um ein Intervall nach vorn. Was zurückkommt, gehört diesem Aufrufer. Der Code in drei Schritten, zuerst Transaktion und `SELECT`:
 
 ```go
 func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]monitor.Target, error) {
@@ -215,8 +239,9 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]monit
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() // no-op after Commit
 
+	// Step 1: read the due targets, inside the transaction.
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, url, interval_seconds, created_at FROM targets
 		 WHERE next_check_at <= ? ORDER BY next_check_at LIMIT ?`,
@@ -233,11 +258,16 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]monit
 		}
 		due = append(due, t)
 	}
-	rows.Close()
+	rows.Close() // free the connection before the next statement
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("select due: %w", err)
 	}
+```
 
+Dann das `UPDATE` als Prepared Statement, einmal vorbereitet und für jedes Ziel mit anderen Parametern ausgeführt:
+
+```go
+	// Step 2: move next_check_at forward, so the next tick skips them.
 	stmt, err := tx.PrepareContext(ctx, `UPDATE targets SET next_check_at = ? WHERE id = ?`)
 	if err != nil {
 		return nil, fmt.Errorf("prepare update: %w", err)
@@ -248,7 +278,12 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]monit
 			return nil, fmt.Errorf("schedule target %d: %w", t.ID, err)
 		}
 	}
+```
 
+Zum Schluss der Commit. Erst danach gehören die Ziele dem Aufrufer:
+
+```go
+	// Step 3: make both steps visible at once.
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
@@ -256,7 +291,9 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]monit
 }
 ```
 
-**`defer tx.Rollback()` direkt nach `BeginTx`.** Das ist das Standardmuster in Go. Jeder frühe `return` wegen eines Fehlers rollt automatisch zurück. Nach einem erfolgreichen `Commit` ist der Rollback harmlos: Er gibt `sql.ErrTxDone` zurück, und der wird ignoriert. In C# erledigt das `using var tx = ...` mit `Dispose`, hier ist es ein `defer`. Vergisst du den Rollback, bleibt die Transaktion offen, hält ihre Verbindung und bei SQLite die Schreibsperre – bis der Pool irgendwann leer ist.
+Die Kommentare sind nur hier zur Orientierung ergänzt; im Repository steht die Funktion ohne sie am Stück. Vier Regeln stecken in diesem Code:
+
+**`defer tx.Rollback()` direkt nach `BeginTx`.** Das ist das Standardmuster in Go. Jeder frühe `return` wegen eines Fehlers rollt automatisch zurück. Nach einem erfolgreichen `Commit` ist der Rollback harmlos: Er gibt `sql.ErrTxDone` zurück, und der wird ignoriert. In C# erledigt das `using var tx = ...` mit `Dispose`, in Java ein `rollback()` im `catch` oder `finally`, hier ist es ein `defer`. Vergisst du den Rollback, bleibt die Transaktion offen, hält ihre Verbindung und bei SQLite die Schreibsperre – bis der Pool irgendwann leer ist.
 
 **Alle Statements über `tx`, nicht über `s.db`.** Eine Transaktion ist an genau eine Verbindung gebunden. Ein `s.db.ExecContext` innerhalb der Funktion würde sich eine andere Verbindung aus dem Pool holen und außerhalb der Transaktion laufen – bei SQLite mit `_txlock=immediate` sogar auf die eigene Schreibsperre warten.
 
@@ -275,20 +312,44 @@ created_at       INTEGER NOT NULL, -- unix milliseconds, UTC
 next_check_at    INTEGER NOT NULL  -- unix milliseconds, UTC
 ```
 
-Das hat drei Vorteile. Zahlen vergleichen und sortieren korrekt, also funktioniert `WHERE next_check_at <= ?` mit dem Index `targets_next_check_at`. Es gibt keine Zeitzonen-Mehrdeutigkeit. Und das Format hängt nicht vom Treiber ab. So sieht die Datenbank nach einem Probelauf von upwatch aus:
-
-```bash
-sqlite3 upwatch.db 'SELECT * FROM targets; SELECT * FROM results;'
-```
-
-```
-1|http://127.0.0.1:18080/gibtsnicht|60|1791664136039|1791664197012
-1|1|404|16||1791664137014
-```
+Das hat drei Vorteile. Zahlen vergleichen und sortieren korrekt, also funktioniert `WHERE next_check_at <= ?` mit dem Index `targets_next_check_at`. Es gibt keine Zeitzonen-Mehrdeutigkeit. Und das Format hängt nicht vom Treiber ab.
 
 In Go wird an der Grenze umgerechnet: `now.UnixMilli()` beim Schreiben, `time.UnixMilli(createdAt).UTC()` beim Lesen. `CreateTarget` schneidet die zurückgegebene Zeit mit `now.Truncate(time.Millisecond)` ab. Dadurch ist das zurückgegebene `Target` exakt gleich dem, was ein späteres `Target(id)` liest – der Test in [store_test.go](../internal/sqlitestore/store_test.go) vergleicht die beiden Structs mit `!=`.
 
 Bei PostgreSQL würdest du dagegen `timestamptz` nehmen und `time.Time` direkt scannen; der Treiber erledigt die Umrechnung.
+
+## Jetzt du: in die Datenbank schauen
+
+Mit dem `sqlite3`-Kommandozeilenwerkzeug (auf macOS vorinstalliert, unter Linux meist als Paket `sqlite3`) siehst du, was upwatch wirklich speichert. Starte die langsame Website aus Teil 06 mit kurzer Antwortzeit und upwatch mit frischer Datenbank:
+
+```bash
+go run ./beispiele/06-concurrency/langsam -delay 50ms
+```
+
+```bash
+export UPWATCH_DB="$(mktemp -d)/upwatch.db"
+UPWATCH_TICK=1s UPWATCH_ALLOW_PRIVATE_TARGETS=true UPWATCH_ADDR=localhost:8090 go run ./cmd/upwatch
+```
+
+Lege in einem dritten Terminal (dort ebenfalls `UPWATCH_DB` exportieren) ein Ziel mit zehn Sekunden Intervall an und schau nach ein paar Sekunden in die Datei:
+
+```bash
+curl -s -X POST localhost:8090/targets -d '{"url":"http://127.0.0.1:18101/ok","interval_seconds":10}'
+sqlite3 "$UPWATCH_DB" '.tables'
+sqlite3 "$UPWATCH_DB" 'SELECT * FROM targets; SELECT * FROM results;'
+sqlite3 "$UPWATCH_DB" "SELECT url, datetime(next_check_at/1000, 'unixepoch') FROM targets;"
+sqlite3 "$UPWATCH_DB" 'PRAGMA journal_mode;'
+```
+
+```text
+results     schema_migrations     targets
+1|http://127.0.0.1:18101/ok|10|1791667164003|1791667174998
+1|1|200|62||1791667164999
+http://127.0.0.1:18101/ok|2026-10-10 21:19:34
+wal
+```
+
+Die Zeitstempel sind die Millisekunden von oben. `next_check_at` liegt knapp zehn Sekunden nach dem Check: Das hat `ClaimDue` beim Beanspruchen eingetragen. `datetime(…/1000, 'unixepoch')` macht daraus lesbare UTC-Zeit. Und `wal` bestätigt, dass das `_pragma` aus dem DSN gegriffen hat; neben `upwatch.db` liegen deshalb die Dateien `upwatch.db-wal` und `upwatch.db-shm`. Ohne `sqlite3` zeigt dir `go run ./beispiele/10-datenbanken/sqlite` weiter unten dieselben Muster in einem Programm.
 
 ## Migrationen mit embed
 
@@ -402,10 +463,10 @@ Eine pragmatische Reihenfolge: Fang mit `database/sql` an, wie upwatch. Wenn die
 
 ## Übungen
 
-1. Füge im Beispiel in `addWithResult` direkt nach `LastInsertId` eine Abfrage über `db` statt über `tx` ein, etwa `db.QueryRowContext(ctx, "SELECT COUNT(*) FROM targets").Scan(&n)`. Führe das Programm einmal so aus und einmal zusätzlich ohne `db.SetMaxOpenConns(1)`. Erkläre beide Ergebnisse – das eine hängt, bis der Context nach zehn Sekunden abläuft, das andere meldet „no such table“.
-2. Schreib für upwatch eine Methode `(*Store).UpdateInterval(ctx, id int64, interval time.Duration) error`, die `monitor.ErrNotFound` zurückgibt, wenn es das Ziel nicht gibt. Ergänze einen Test in `store_test.go`.
-3. Füge eine zweite Migration `002_target_name.sql` hinzu, die eine Spalte `name TEXT NOT NULL DEFAULT ''` anlegt. Prüfe mit `TestMigrateIsIdempotent`, dass ein zweiter Start sie nicht erneut ausführt.
-4. Schreib einen Test, der zwei Goroutinen gleichzeitig `ClaimDue` für dasselbe fällige Ziel aufrufen lässt, und prüfe, dass genau eine es bekommt. Was passiert, wenn du `_txlock=immediate` testweise entfernst?
+1. **Aufwärmen:** Lass `sqlite3 "$UPWATCH_DB" .schema` laufen und finde im Schema den Index, den `ClaimDue` für `WHERE next_check_at <= ?` nutzt. Lösche dann per `curl -X DELETE` ein Ziel mit Ergebnissen und prüfe mit `SELECT COUNT(*) FROM results`, dass `ON DELETE CASCADE` gegriffen hat.
+2. **Kern:** Füge im Beispiel in `addWithResult` direkt nach `LastInsertId` eine Abfrage über `db` statt über `tx` ein, etwa `db.QueryRowContext(ctx, "SELECT COUNT(*) FROM targets").Scan(&n)`. Führe das Programm einmal so aus und einmal zusätzlich ohne `db.SetMaxOpenConns(1)`. Erkläre beide Ergebnisse – das eine hängt, bis der Context nach zehn Sekunden abläuft, das andere meldet „no such table“.
+3. **Kern:** Schreib für upwatch eine Methode `(*Store).UpdateInterval(ctx, id int64, interval time.Duration) error`, die `monitor.ErrNotFound` zurückgibt, wenn es das Ziel nicht gibt, und ergänze einen Test in `store_test.go`. Füge danach eine zweite Migration `002_target_name.sql` hinzu, die eine Spalte `name TEXT NOT NULL DEFAULT ''` anlegt, und prüfe mit `TestMigrateIsIdempotent`, dass ein zweiter Start sie nicht erneut ausführt.
+4. **Profi:** Schreib einen Test, der zwei Goroutines gleichzeitig `ClaimDue` für dasselbe fällige Ziel aufrufen lässt, und prüfe, dass genau eine es bekommt. Was passiert, wenn du `_txlock=immediate` testweise entfernst?
 
 ---
 

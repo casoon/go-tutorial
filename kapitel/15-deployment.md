@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel kannst du upwatch für jede gängige Plattform bauen, als systemd-Dienst oder als kleines Container-Image betreiben und weißt, wie Graceful Shutdown, Health Checks und ein Reverse Proxy zusammenspielen.
 
+> **upwatch in diesem Teil:** [Makefile](../Makefile), [Dockerfile](../Dockerfile), [deploy/upwatch.service](../deploy/upwatch.service) und die Shutdown-Logik in [main.go](../cmd/upwatch/main.go)
+> **Voraussetzungen:** Teil 12 (Konfiguration, Health Checks, Graceful Shutdown), Teil 13 (Debug-Listener, ohne Rechte laufen)
+
 ## Das Binary ist die Anwendung
 
 Wer eine ASP.NET-Core-Anwendung ausliefert, liefert entweder eine Runtime mit oder setzt eine voraus, dazu einen Ordner mit DLLs und Konfigurationsdateien. Eine Node.js-Anwendung bringt `node_modules` mit, eine Java-Anwendung ein JAR und eine JVM. Self-contained Deployments, Native AOT oder GraalVM Native Image gibt es, aber sie sind Sonderwege mit Einschränkungen.
@@ -12,7 +15,28 @@ In Go ist das der Normalfall. `go build` erzeugt eine einzelne ausführbare Date
 GOOS=linux GOARCH=amd64 go build -o upwatch ./cmd/upwatch
 ```
 
-Das Ergebnis kopierst du auf einen Linux-Server und startest es. Das ist das ganze Deployment-Modell; alles Weitere in diesem Kapitel sind Varianten davon, wie dieses eine Binary gestartet, überwacht und mit Konfiguration versorgt wird.
+Das Ergebnis kopierst du auf einen Linux-Server und startest es. Das ist das ganze Deployment-Modell; alles Weitere in diesem Kapitel sind Varianten davon, wie dieses eine Binary gestartet, überwacht und mit Konfiguration versorgt wird. Am Ende steht diese Topologie:
+
+```text
+                     Internet
+                        │ HTTPS :443
+         ┌──────────────▼───────────────┐
+         │ Reverse Proxy (Caddy, nginx) │  TLS-Zertifikate, HSTS, Zugriffslog
+         └──────────────┬───────────────┘
+                        │ HTTP an 127.0.0.1:8080
+         ┌──────────────▼───────────────┐
+         │ upwatch                      │  systemd: DynamicUser, Hardening
+         │   API    127.0.0.1:8080      │◄── Probes: /healthz, /readyz
+         │   Debug  127.0.0.1:6060      │  nur mit UPWATCH_DEBUG_ADDR
+         └──────────────┬───────────────┘
+                        │
+         ┌──────────────▼───────────────┐
+         │ SQLite                       │  systemd: /var/lib/upwatch/upwatch.db
+         │                              │  Docker:  Volume /data/upwatch.db
+         └──────────────────────────────┘
+```
+
+Im Container lauscht upwatch auf `:8080`, und Docker reicht den Port herein (etwa mit `-p 127.0.0.1:8080:8080`); sonst bleibt das Bild gleich.
 
 ## Cross-Compilation
 
@@ -28,12 +52,16 @@ build-all:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/upwatch-windows-amd64.exe ./cmd/upwatch
 ```
 
-Ausgeführt auf einem Mac mit Apple-Silicon-Prozessor:
+### Jetzt du: vier Plattformen von einem Rechner
+
+Führe im Repository aus:
 
 ```bash
 make build-all
 file bin/*
 ```
+
+Auf einem Mac mit Apple-Silicon-Prozessor sah das so aus:
 
 ```
 bin/upwatch-darwin-arm64:      Mach-O 64-bit executable arm64
@@ -141,22 +169,24 @@ Restart=on-failure
 RestartSec=2
 ```
 
-`systemctl stop` schickt `SIGTERM`. upwatch fängt das mit `signal.NotifyContext` ab ([Teil 07](07-context.md)), beendet den HTTP-Server mit `srv.Shutdown` und einer Frist von 15 Sekunden und lässt den Scheduler seine Worker leeren. `TimeoutStopSec=30` gibt dafür mehr Zeit, als der Shutdown maximal braucht; erst danach folgt `SIGKILL`. Diese beiden Zahlen gehören zusammen: Ist das Timeout des Prozessmanagers kürzer als das des Programms, wird der Graceful Shutdown regelmäßig abgeschnitten. `Restart=on-failure` startet den Dienst neu, wenn er mit einem Fehler endet, etwa weil `run()` einen Fehler zurückgibt und `main` mit `os.Exit(1)` beendet.
+`systemctl stop` schickt `SIGTERM`. upwatch fängt das mit `signal.NotifyContext` ab ([Teil 12](12-logging-konfiguration-observability.md)), beendet den HTTP-Server mit `srv.Shutdown` und einer Frist von 15 Sekunden und lässt den Scheduler seine Worker leeren. `TimeoutStopSec=30` gibt dafür mehr Zeit, als der Shutdown maximal braucht; erst danach folgt `SIGKILL`. Diese beiden Zahlen gehören zusammen: Ist das Timeout des Prozessmanagers kürzer als das des Programms, wird der Graceful Shutdown regelmäßig abgeschnitten. `Restart=on-failure` startet den Dienst neu, wenn er mit einem Fehler endet, etwa weil `run()` einen Fehler zurückgibt und `main` mit `os.Exit(1)` beendet.
 
-```ini
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-```
+Der Rest der Unit ist Hardening nach einem Prinzip: upwatch braucht Netzwerk und sein Datenverzeichnis, sonst nichts. Jeder Schalter nimmt dem Prozess eine Fähigkeit, die ein Angreifer nach einer Codeausführung sonst nutzen könnte:
 
-Das Hardening folgt einem Prinzip: upwatch braucht Netzwerk und sein Datenverzeichnis, sonst nichts. `ProtectSystem=strict` macht das gesamte Dateisystem schreibgeschützt (bis auf `StateDirectory`), `ProtectHome` blendet Home-Verzeichnisse aus, `PrivateDevices` die meisten Geräte. `RestrictAddressFamilies` erlaubt nur IP- und Unix-Sockets. `MemoryDenyWriteExecute` verbietet Speicherseiten, die gleichzeitig beschreibbar und ausführbar sind – das funktioniert mit Go, weil Go keinen JIT hat. Mit einer .NET- oder Java-Anwendung, deren JIT genau solche Seiten braucht, würde dieser Schalter den Start verhindern.
+| Schalter | Was er verhindert |
+|---|---|
+| `NoNewPrivileges=yes` | dass der Prozess oder seine Kinder über setuid-Programme mehr Rechte bekommen |
+| `ProtectSystem=strict` | Schreiben irgendwo im Dateisystem außer im `StateDirectory` |
+| `ProtectHome=yes` | Zugriff auf `/home`, `/root` und `/run/user` |
+| `PrivateTmp=yes` | Austausch über ein mit anderen Diensten geteiltes `/tmp` |
+| `PrivateDevices=yes` | Zugriff auf Hardware-Geräte unter `/dev` |
+| `ProtectKernelTunables=yes` | Ändern von Kernel-Parametern über `/proc/sys` und `/sys` |
+| `ProtectControlGroups=yes` | Ändern der cgroup-Hierarchie (Ressourcenlimits) |
+| `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` | andere Socket-Arten als IP und Unix, etwa Netlink oder Raw-Pakete |
+| `LockPersonality=yes` | Umschalten der Ausführungsdomäne per `personality()` |
+| `MemoryDenyWriteExecute=yes` | Speicherseiten, die zugleich beschreibbar und ausführbar sind; eingeschleuster Code lässt sich so nicht einfach ausführen |
+
+Die letzte Zeile ist für Umsteiger die interessanteste. `MemoryDenyWriteExecute` funktioniert mit upwatch, weil Go vorab kompiliert und keinen JIT hat. Eine .NET- oder Java-Anwendung erzeugt Maschinencode zur Laufzeit und braucht genau solche Seiten; mit diesem Schalter würde sie nicht starten.
 
 `systemd-analyze security upwatch` bewertet die Unit und zeigt, welche Optionen noch fehlen. Einen Teil der Liste wirst du nicht übernehmen wollen, aber sie ist eine gute Prüfliste.
 
@@ -236,14 +266,25 @@ RUN mkdir /out/data
 COPY --from=build --chown=nonroot:nonroot /out/data /data
 ```
 
-Mit dieser Änderung startete der Container, beantwortete `/readyz` mit 200 und beendete sich bei `docker stop` sauber:
+Mit dieser Änderung startet der Container, beantwortet `/readyz` mit 200 und beendet sich bei `docker stop` sauber. Ein erneuter Lauf mit dem aktuellen Dockerfile (Docker 29.5, Apple M4 Pro):
+
+```bash
+docker build -t upwatch:dev .
+docker run -d --name upwatch -p 127.0.0.1:18117:8080 upwatch:dev
+curl -s localhost:18117/readyz
+docker stop upwatch && docker logs upwatch
+docker rm upwatch
+```
 
 ```
-{"time":"…","level":"INFO","msg":"listening","addr":":8080"}
-{"time":"…","level":"INFO","msg":"request","method":"GET","path":"/readyz","status":200,"duration":765140}
-{"time":"…","level":"INFO","msg":"shutting down"}
-{"time":"…","level":"INFO","msg":"stopped"}
+{"time":"2026-10-10T21:18:42.479346091Z","level":"INFO","msg":"starting","version":"dev","addr":":8080","db":"/data/upwatch.db"}
+{"time":"2026-10-10T21:18:42.51223487Z","level":"INFO","msg":"listening","addr":":8080"}
+{"time":"2026-10-10T21:18:44.532551035Z","level":"INFO","msg":"request","method":"GET","path":"/readyz","status":200,"duration":301005}
+{"time":"2026-10-10T21:18:44.9125864Z","level":"INFO","msg":"shutting down"}
+{"time":"2026-10-10T21:18:44.912661818Z","level":"INFO","msg":"stopped"}
 ```
+
+Zwischen „shutting down“ und „stopped“ liegen hier 75 Mikrosekunden: Ohne laufende Requests und Checks hat der Graceful Shutdown nichts abzuwarten.
 
 Wenn du einen Bind-Mount (`-v /srv/upwatch:/data`) benutzt, muss das Verzeichnis auf dem Host UID 65532 gehören. Das ist der Preis für einen Container, der nicht als root läuft – und er ist es wert.
 
@@ -281,30 +322,17 @@ Zwei Variablen, die nicht zu upwatch gehören, sondern zur Go-Laufzeit, sind in 
 
 Ein Deployment mit Docker, Kubernetes oder einem anderen Orchestrator ersetzt laufende Instanzen. Damit dabei keine Requests verloren gehen, müssen zwei Dinge zusammenpassen: wie der Orchestrator eine Instanz beendet und wie er erkennt, dass eine neue bereit ist.
 
-Zum Beenden schickt jeder Orchestrator zuerst `SIGTERM`, wartet eine Frist ab und schickt dann `SIGKILL`. Bei systemd ist die Frist `TimeoutStopSec`, bei Kubernetes `terminationGracePeriodSeconds` (Default 30 Sekunden), bei `docker stop` sind es 10 Sekunden, einstellbar mit `docker stop -t` oder in Compose mit `stop_grace_period`. upwatch nimmt sich bis zu 15 Sekunden für `srv.Shutdown`. Bei Docker solltest du die Frist also erhöhen, sonst kann ein langsamer Request beim Stoppen abgeschnitten werden. Im Normalfall ist upwatch deutlich schneller fertig: Im Test oben lagen zwischen „shutting down“ und „stopped“ weniger als eine Millisekunde.
+Zum Beenden schickt jeder Orchestrator zuerst `SIGTERM`, wartet eine Frist ab und schickt dann `SIGKILL`. upwatch nimmt sich bis zu 15 Sekunden für `srv.Shutdown` (der Ablauf steht in Teil 12). Die Frist der Plattform muss darüber liegen:
 
-Zum Erkennen der Bereitschaft hat upwatch zwei Endpunkte in [httpapi.go](../internal/httpapi/httpapi.go):
+| Plattform | Frist bis `SIGKILL` | Einstellen mit |
+|---|---|---|
+| systemd | in der Unit von upwatch 30 s | `TimeoutStopSec=` |
+| `docker stop` | 10 s | `docker stop -t 30`, in Compose `stop_grace_period` |
+| Kubernetes | 30 s | `terminationGracePeriodSeconds` |
 
-```go
-// healthz answers "is the process alive?" and never touches dependencies.
-func (a *API) healthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
+Bei Docker solltest du die Frist also erhöhen, sonst kann ein langsamer Request beim Stoppen abgeschnitten werden. Ohne laufende Requests war upwatch im Container-Lauf oben nach 75 Mikrosekunden fertig; die Frist zählt nur, wenn ein Request oder Check hängt.
 
-// readyz answers "can this instance serve traffic?" and checks the database.
-func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-	defer cancel()
-	if err := a.store.Ping(ctx); err != nil {
-		// ...
-		writeError(w, http.StatusServiceUnavailable, "database unavailable")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-}
-```
-
-In Kubernetes gehört `/healthz` an die Liveness-Probe und `/readyz` an die Readiness-Probe. Die Trennung ist wichtig. Schlägt die Liveness-Probe fehl, startet Kubernetes den Container neu. Würde sie die Datenbank prüfen, würde ein kurzer Datenbankausfall alle Instanzen gleichzeitig neu starten lassen, was nichts repariert. Schlägt die Readiness-Probe fehl, nimmt Kubernetes die Instanz nur aus dem Load Balancing, bis sie wieder bereit ist. Bei einem Rolling Update wartet Kubernetes, bis die neue Instanz bereit meldet, bevor es die alte beendet.
+Zum Erkennen der Bereitschaft dienen `/healthz` und `/readyz`. Die Endpunkte und die Begründung für die Trennung kennst du aus Teil 12; in Kubernetes werden sie so angebunden:
 
 ```yaml
 livenessProbe:
@@ -313,7 +341,13 @@ readinessProbe:
   httpGet: { path: /readyz, port: 8080 }
 ```
 
-Eine Feinheit beim Beenden: Kubernetes schickt `SIGTERM` und entfernt die Instanz aus den Endpunkten ungefähr gleichzeitig, nicht nacheinander. Für einen kurzen Moment können also noch neue Verbindungen ankommen, während `srv.Shutdown` den Listener schon geschlossen hat. Üblich ist ein `preStop`-Hook mit einigen Sekunden Wartezeit, oder die Anwendung lässt `/readyz` nach `SIGTERM` zuerst 503 melden und schließt den Listener verzögert. upwatch macht beides nicht – bei einer einzelnen Instanz, wie gleich erklärt, spielt das keine Rolle.
+Schlägt die Liveness-Probe fehl, startet Kubernetes den Container neu; schlägt die Readiness-Probe fehl, nimmt es die Instanz nur aus dem Load Balancing. Bei einem Rolling Update wartet Kubernetes, bis die neue Instanz bereit meldet, bevor es die alte beendet.
+
+### Readiness-Drain
+
+Eine Feinheit beim Beenden: Kubernetes schickt `SIGTERM` und entfernt die Instanz ungefähr gleichzeitig aus den Endpunkten, nicht nacheinander. Bis alle Load Balancer und kube-proxy-Regeln aktualisiert sind, können noch neue Verbindungen ankommen – während `srv.Shutdown` den Listener schon geschlossen hat. Diese Clients bekommen „connection refused“.
+
+Das Gegenmittel heißt Readiness-Drain: Nach `SIGTERM` schaltet die Anwendung zuerst `/readyz` auf 503, bedient aber weiter alle Requests. Nach einer Wartezeit von einigen Sekunden, in der die Plattform die Instanz aus dem Verkehr nimmt, ruft sie `srv.Shutdown` auf. Die Wartezeit plus die 15 Sekunden für `Shutdown` müssen dann in die Frist der Plattform passen. Alternativ übernimmt ein `preStop`-Hook mit einem `sleep` die Wartezeit, ohne dass die Anwendung etwas davon weiß. upwatch macht beides nicht – bei einer einzelnen Instanz, wie gleich erklärt, gibt es keinen Load Balancer, der umschalten könnte. Übung 4 baut den Drain trotzdem ein.
 
 Docker selbst kennt die Anweisung `HEALTHCHECK`. In einem distroless-Image gibt es aber weder `curl` noch eine Shell, um sie auszuführen. Wenn du sie brauchst, wäre ein Unterbefehl im Binary selbst der Weg (`/upwatch healthcheck`, der `/healthz` abfragt). Orchestratoren wie Kubernetes prüfen ohnehin von außen per HTTP.
 
@@ -367,10 +401,10 @@ Wer horizontal skalieren will, braucht eine Datenbank, die mehrere Prozesse übe
 
 ## Übungen
 
-1. Baue upwatch einmal mit und einmal ohne `-ldflags="-s -w"` und vergleiche die Größen. Prüfe mit `go version -m`, welche Build-Informationen in beiden Fällen enthalten sind. Lege einen Git-Tag an und schau, was `make build` jetzt als Version einträgt.
-2. Lies die Version zur Laufzeit zusätzlich aus `debug.ReadBuildInfo()` und gib `vcs.revision` beim Start im Log aus. Wann ist der Wert leer?
-3. Starte den Container mit einem Named Volume (`docker run -v upwatch-data:/data -p 8080:8080 upwatch:dev`), lege ein Ziel an, stoppe und starte den Container neu und prüfe, dass das Ziel noch da ist.
-4. Lass `/readyz` nach `SIGTERM` mit 503 antworten, bevor `srv.Shutdown` aufgerufen wird, und warte dazwischen eine konfigurierbare Zeit (`UPWATCH_SHUTDOWN_DELAY`). Welche Komponente muss dafür von wem erfahren, dass der Shutdown begonnen hat?
+1. **Aufwärmen:** Baue upwatch einmal mit und einmal ohne `-ldflags="-s -w"` und vergleiche die Größen. Prüfe mit `go version -m`, welche Build-Informationen in beiden Fällen enthalten sind. Lege einen Git-Tag an und schau, was `make build` jetzt als Version einträgt.
+2. **Kern:** Lies die Version zur Laufzeit zusätzlich aus `debug.ReadBuildInfo()` und gib `vcs.revision` beim Start im Log aus. Wann ist der Wert leer?
+3. **Kern:** Starte den Container mit einem Named Volume (`docker run -v upwatch-data:/data -p 8080:8080 upwatch:dev`), lege ein Ziel an, stoppe und starte den Container neu und prüfe, dass das Ziel noch da ist.
+4. **Profi:** Lass `/readyz` nach `SIGTERM` mit 503 antworten, bevor `srv.Shutdown` aufgerufen wird, und warte dazwischen eine konfigurierbare Zeit (`UPWATCH_SHUTDOWN_DELAY`). Welche Komponente muss dafür von wem erfahren, dass der Shutdown begonnen hat?
 
 ---
 

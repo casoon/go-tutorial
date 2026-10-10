@@ -2,18 +2,34 @@
 
 Nach diesem Kapitel weißt du, warum Go Fehler als normale Rückgabewerte behandelt, wie du sie mit Kontext anreicherst, gezielt prüfst und an der Systemgrenze in Statuscodes übersetzt – und wann `panic` das richtige Werkzeug ist.
 
+> **upwatch in diesem Teil:** die Fehlerwerte in [monitor.go](../internal/monitor/monitor.go), ihre Übersetzung in [store.go](../internal/sqlitestore/store.go) und `handleError` in [httpapi.go](../internal/httpapi/httpapi.go)
+> **Voraussetzungen:** Teil 03 und 04
+
+## Auf einen Blick
+
+Die Tabelle ordnet die Begriffe dieses Kapitels dem zu, was du kennst. Die Go-Spalte wird in den folgenden Abschnitten erklärt.
+
+| C# | Java | TypeScript | Go |
+|---|---|---|---|
+| `throw new X(…)` | `throw new X(…)` | `throw new Error(…)` | `return …, err` |
+| `catch (X ex)` | `catch (X e)` | `catch (e: unknown)` plus `instanceof` | `errors.As(err, &target)` |
+| `catch (…) when (ex == …)`, Exception-Filter | – | – | `errors.Is(err, ErrX)` |
+| `finally`, `using` | `finally`, try-with-resources | `finally` | `defer` |
+| `InnerException` | `getCause()` | `cause` | `%w` in `fmt.Errorf`, `Unwrap` |
+| nicht in der Signatur | `throws X` | nicht in der Signatur | `error` als letzter Rückgabewert |
+
 ## Das Ausgangsbeispiel
 
 ```go
-user, err := repository.Find(id)
+t, err := store.Target(ctx, id)
 if err != nil {
-	return fmt.Errorf("find user %d: %w", id, err)
+	return fmt.Errorf("load target for check: %w", err)
 }
 ```
 
-Drei Zeilen, die in jedem Go-Programm hundertfach vorkommen. `Find` gibt zwei Werte zurück: das Ergebnis und einen Fehler. Ist `err` nicht `nil`, ist `user` bedeutungslos (in der Regel der Nullwert), und die Funktion reicht den Fehler weiter – nicht unverändert, sondern mit einem Satz Kontext davor.
+Drei Zeilen, die in jedem Go-Programm hundertfach vorkommen. `Target` aus [store.go](../internal/sqlitestore/store.go) gibt zwei Werte zurück: das Ziel und einen Fehler (`ctx` kannst du bis Teil 07 ignorieren). Ist `err` nicht `nil`, ist `t` bedeutungslos (in der Regel der Zero Value), und die Funktion reicht den Fehler weiter – nicht unverändert, sondern mit einem Satz Kontext davor.
 
-`error` ist dabei kein Sprachkonstrukt, sondern ein gewöhnliches Interface aus dem Universe-Block:
+`error` ist dabei kein Sprachkonstrukt, sondern ein gewöhnliches, eingebautes Interface:
 
 ```go
 type error interface {
@@ -28,12 +44,12 @@ Jeder Typ mit einer Methode `Error() string` ist ein Fehler. Es gibt keine Klass
 In C# oder TypeScript sieht derselbe Code so aus:
 
 ```csharp
-var user = repository.Find(id); // may throw – or may not
+var target = store.Target(id); // may throw – or may not
 ```
 
-Ob `Find` werfen kann, steht nirgends. Die Signatur verrät es nicht, der Aufrufer sieht es nicht, und der Kontrollfluss springt im Fehlerfall an eine Stelle, die womöglich drei Dateien entfernt liegt. Das ist bequem, solange alles gut geht, und unangenehm, wenn man verstehen will, was im Fehlerfall passiert: Jede Zeile ist ein potenzieller Ausgang. Java hat mit Checked Exceptions versucht, das sichtbar zu machen; in der Praxis hat das vor allem zu `throws Exception` und leeren `catch`-Blöcken geführt.
+Ob `Target` werfen kann, steht nirgends. Die Signatur verrät es nicht, der Aufrufer sieht es nicht, und der Kontrollfluss springt im Fehlerfall an eine Stelle, die womöglich drei Dateien entfernt liegt. Das ist bequem, solange alles gut geht, und unangenehm, wenn man verstehen will, was im Fehlerfall passiert: Jede Zeile ist ein potenzieller Ausgang. Java hat mit Checked Exceptions versucht, das sichtbar zu machen; in der Praxis hat das vor allem zu `throws Exception` und leeren `catch`-Blöcken geführt.
 
-Go macht den Fehlerpfad zum Teil der Signatur und des Codes. `func Find(id int64) (User, error)` sagt: Diese Funktion kann scheitern, und du musst dich entscheiden, was dann passiert. Beim Lesen siehst du jede Stelle, an der eine Funktion vorzeitig verlassen wird. Es gibt keine unsichtbaren Sprünge.
+Go macht den Fehlerpfad zum Teil der Signatur und des Codes. `func (s *Store) Target(ctx context.Context, id int64) (monitor.Target, error)` sagt: Diese Funktion kann scheitern, und du musst dich entscheiden, was dann passiert. Beim Lesen siehst du jede Stelle, an der eine Funktion vorzeitig verlassen wird. Es gibt keine unsichtbaren Sprünge.
 
 Der Preis ist Schreibarbeit, und darüber wird viel geklagt. Aber `if err != nil` ist kein Ritual, das man abarbeitet, sondern genau die Stelle, an der du eine Entscheidung triffst. Du kannst
 
@@ -48,7 +64,7 @@ Ein zweiter, weniger offensichtlicher Grund: Exceptions sind teuer und für Ausn
 
 ## Kontext hinzufügen mit `fmt.Errorf` und `%w`
 
-Ein nackt durchgereichter Fehler ist am Ende der Kette oft wertlos. „not found“ in einem Log – nicht gefunden, was? Deshalb fügt jede Schicht hinzu, was sie weiß:
+Ein nackt durchgereichter Fehler ist am Ende der Kette oft wertlos. „not found“ in einem Log – nicht gefunden, was? Deshalb fügt jede Schicht hinzu, was sie weiß. Im Beispiel [fehler/main.go](../beispiele/05-fehlerbehandlung/fehler/main.go) gibt es dafür ein Repository und einen Service:
 
 ```go
 // repository
@@ -96,7 +112,7 @@ if errors.Is(err, sql.ErrNoRows) {
 }
 ```
 
-Hier steht bewusst kein `%w` auf `sql.ErrNoRows`. Würde der Store den SQL-Fehler durchreichen, müsste der HTTP-Handler `database/sql` kennen, um „nicht gefunden“ zu erkennen – und ein In-Memory-Store für Tests müsste `sql.ErrNoRows` zurückgeben, obwohl er gar keine Datenbank hat. Mit `monitor.ErrNotFound` als gemeinsamer Sprache sprechen alle Store-Implementierungen denselben Dialekt, und das `monitor`-Paket bleibt frei von Infrastruktur.
+Hier steht kein `%w` auf `sql.ErrNoRows`. Würde der Store den SQL-Fehler durchreichen, müsste der HTTP-Handler `database/sql` kennen, um „nicht gefunden“ zu erkennen – und ein In-Memory-Store für Tests müsste `sql.ErrNoRows` zurückgeben, obwohl er gar keine Datenbank hat. Mit `monitor.ErrNotFound` als gemeinsamer Sprache sprechen alle Store-Implementierungen denselben Dialekt, und das `monitor`-Paket bleibt frei von Infrastruktur.
 
 ## Eigene Error-Typen und `errors.As`
 
@@ -117,13 +133,20 @@ func (e *ValidationError) Error() string {
 `monitor.NewTarget` und `monitor.NormalizeURL` geben ihn zurück, etwa `&ValidationError{Field: "url", Reason: "scheme must be http or https"}`. Um ihn aus einer Kette herauszuholen, gibt es `errors.As`:
 
 ```go
-var ve *monitor.ValidationError
-if errors.As(err, &ve) {
+var ve *monitor.ValidationError // 1. a pointer variable, still nil
+if errors.As(err, &ve) {        // 2. pass the address of that variable
+	// 3. As found a *ValidationError in the chain and stored it in ve
 	writeError(w, http.StatusBadRequest, ve.Error())
 }
 ```
 
-Das sieht beim ersten Mal seltsam aus: ein Zeiger auf einen Zeiger. `errors.As` sucht in der Kette einen Fehler, der sich der Variablen `ve` zuweisen lässt, und schreibt ihn hinein. Weil `Error()` auf `*ValidationError` definiert ist, ist der Fehler ein `*ValidationError`, also ist `ve` vom Typ `*ValidationError`, und `As` braucht deren Adresse. Wer stattdessen `var ve monitor.ValidationError` schreibt, übergibt einen Zeiger auf einen Typ, der `error` gar nicht implementiert: `go vet` meldet das, und zur Laufzeit panikt `errors.As` mit „target must be interface or implement error“.
+Das sieht beim ersten Mal seltsam aus: `&ve` ist ein Zeiger auf einen Zeiger. Schritt für Schritt:
+
+1. `Error()` ist auf `*ValidationError` definiert, also steckt in der Kette ein Wert vom Typ `*ValidationError`. Die Variable, die ihn aufnehmen soll, hat deshalb genau diesen Typ: `var ve *monitor.ValidationError`. Sie ist zunächst `nil`.
+2. `errors.As` soll diese Variable füllen. Eine Funktion kann eine Variable des Aufrufers nur verändern, wenn sie deren Adresse bekommt – also `&ve`, Typ `**monitor.ValidationError`. Das ist dasselbe Prinzip wie `*dst = n` in der Closure aus Teil 03 oder wie ein `out`-Parameter in C#: `errors.As(err, &ve)` entspricht ungefähr `TryFind(err, out ValidationError? ve)`.
+3. `As` läuft die Kette ab, findet den ersten Fehler, der sich `ve` zuweisen lässt, schreibt ihn hinein und gibt `true` zurück.
+
+Wer stattdessen `var ve monitor.ValidationError` schreibt, übergibt einen Zeiger auf einen Typ, der `error` gar nicht implementiert: `go vet` meldet das, und zur Laufzeit panikt `errors.As` mit „target must be interface or implement error“.
 
 Seit Go 1.26 gibt es mit `errors.AsType` eine generische Variante, die ohne die Hilfsvariable auskommt:
 
@@ -146,7 +169,7 @@ func isUniqueViolation(err error) bool {
 
 Daraus wird `monitor.ErrDuplicate` – wieder die Übersetzung an der Paketgrenze.
 
-Sentinel oder Typ? Ein Sentinel reicht, wenn der Aufrufer nur wissen muss, *dass* etwas passiert ist. Ein Typ lohnt sich, wenn er Daten braucht. Für C#-Entwickler: Ein eigener Error-Typ ist ungefähr eine eigene Exception-Klasse, `errors.As` ist `catch (ValidationException ve)`, `errors.Is` ist `catch` mit `when (ex == ...)`. Der Unterschied: Du prüfst explizit, wo du es brauchst, statt dass die Laufzeit einen passenden Handler sucht.
+Sentinel oder Typ? Ein Sentinel reicht, wenn der Aufrufer nur wissen muss, *dass* etwas passiert ist. Ein Typ lohnt sich, wenn er Daten braucht. Ein eigener Error-Typ ist ungefähr eine eigene Exception-Klasse, und die Tabelle am Kapitelanfang ordnet `errors.As` und `errors.Is` den passenden `catch`-Formen zu. Der Unterschied: Du prüfst explizit, wo du es brauchst, statt dass die Laufzeit einen passenden Handler sucht.
 
 ## `%w` oder `%v`: die Kette bewusst abschneiden
 
@@ -232,16 +255,42 @@ func (a *API) serverError(w http.ResponseWriter, r *http.Request, err error) {
 
 Ein unerwarteter Fehler enthält dank sauberem Wrapping viel Kontext – Tabellennamen, Dateipfade, Hostnamen der Datenbank. Genau dieser Kontext gehört ins Log und nicht in die Antwort an einen beliebigen Client. Das ist dieselbe Regel wie „keine Stacktraces in Produktions-Fehlerseiten“ in ASP.NET, nur dass sie hier im Code steht statt in einer Konfiguration.
 
+## Jetzt du: Fehler über die API auslösen
+
+Starte upwatch auf einem freien Port mit einer Wegwerf-Datenbank und provoziere jeden Zweig von `handleError` einmal:
+
+```bash
+UPWATCH_ADDR=127.0.0.1:8081 UPWATCH_DB=/tmp/upwatch-errors.db go run ./cmd/upwatch
+```
+
+```bash
+curl -s localhost:8081/targets/99                                        # ErrNotFound
+curl -s -X POST localhost:8081/targets -d '{"url":"ftp://example.com"}'  # ValidationError
+curl -s -X POST localhost:8081/targets -d '{"url":"https://example.com"}'
+curl -s -X POST localhost:8081/targets -d '{"url":"https://example.com"}' # ErrDuplicate
+curl -s -X POST localhost:8081/targets -d '{"url":"https://example.com","foo":1}'
+```
+
+```
+{"error":"target not found"}
+{"error":"invalid url: scheme must be http or https"}
+{"id":1,"url":"https://example.com","interval_seconds":60,"created_at":"…"}
+{"error":"target already exists"}
+{"error":"invalid JSON: json: unknown field \"foo\""}
+```
+
+Achte auf zwei Dinge. Bei 404 und 409 steht in der Antwort ein fester Text, nicht die Meldung aus dem Store. Und die letzte Antwort enthält den Text des JSON-Decoders, weil `readJSON` ihn mit `%v` übernommen hat – als Text, ohne die Kette. Im Log des Servers erscheint jede Anfrage einmal mit ihrem Statuscode, keine doppelt. Beende den Server mit `Ctrl+C`.
+
 ## Einmal behandeln: loggen oder zurückgeben
 
 Ein verbreitetes Muster aus Exception-Welten, das in Go besonders stört:
 
 ```go
 // Don't: every layer logs and returns.
-t, err := s.repo.Find(id)
+t, err := s.store.Target(ctx, id)
 if err != nil {
-	log.Printf("find failed: %v", err)
-	return fmt.Errorf("find: %w", err)
+	log.Printf("load target failed: %v", err)
+	return fmt.Errorf("load target: %w", err)
 }
 ```
 
@@ -251,7 +300,6 @@ In upwatch loggt der Store nie. Er gibt zurück, und erst ganz oben wird entschi
 
 ```go
 if err := s.store.SaveResult(ctx, r); err != nil {
-	saveFailures.Add(1)
 	s.logger.Error("save result", "target_id", r.TargetID, "err", err)
 }
 ```
@@ -291,9 +339,9 @@ func (a *API) recoverPanics(next http.Handler) http.Handler {
 }
 ```
 
-`recover` wirkt nur innerhalb einer `defer`-Funktion und nur in der Goroutine, in der die Panik auftritt. `http.ErrAbortHandler` ist ein Sonderfall: Mit diesem Wert bricht ein Handler absichtlich die Antwort ab, und `net/http` erwartet, ihn selbst zu sehen – deshalb wird er weitergeworfen.
+`defer func() { … }()` ist ein `defer` mit einer anonymen Funktion: Sie wird an dieser Stelle registriert – die Klammern `()` am Ende sind der Aufruf, der aufgeschoben wird – und läuft, wenn der Handler verlassen wird, also auch dann, wenn `next.ServeHTTP` panikt. `recover` wirkt nur innerhalb einer solchen `defer`-Funktion und nur in der Goroutine, in der die Panik auftritt. `http.ErrAbortHandler` ist ein Sonderfall: Mit diesem Wert bricht ein Handler absichtlich die Antwort ab, und `net/http` erwartet, ihn selbst zu sehen – deshalb wird er weitergeworfen.
 
-Eine wichtige Grenze: Eine Panik in einer *anderen* Goroutine fängt diese Middleware nicht. Startet ein Handler eine Goroutine und die panikt, stürzt der ganze Prozess ab. Das ist Absicht – Go hat keinen globalen Exception-Handler, der Fehler in Hintergrund-Threads verschluckt. Wer Goroutinen startet, ist für deren Fehler verantwortlich, und zwar über `error`-Werte, die er per Channel oder geteilter Variable zurückmeldet. Mehr dazu im nächsten Kapitel.
+Eine wichtige Grenze: Eine Panik in einer *anderen* Goroutine fängt diese Middleware nicht. Startet ein Handler eine Goroutine und die panikt, stürzt der ganze Prozess ab. Das ist Absicht – Go hat keinen globalen Exception-Handler, der Fehler in Hintergrund-Threads verschluckt. Fehler aus Goroutinen meldet man deshalb als `error`-Werte zurück, etwa über einen Channel. Mehr dazu im nächsten Kapitel.
 
 ## Fehler testen
 
@@ -331,10 +379,10 @@ go test ./beispiele/05-fehlerbehandlung/...
 
 ## Übungen
 
-1. Ersetze in `handleError` das `errors.As` durch `errors.AsType`. Laufen die Tests in `internal/httpapi` weiterhin durch?
-2. Ändere in `sqlitestore.Store.Target` das Wrapping so, dass zusätzlich `sql.ErrNoRows` mit `%w` eingepackt wird (Tipp: `fmt.Errorf` akzeptiert seit Go 1.20 mehrere `%w`). Welcher Code außerhalb des Stores könnte sich jetzt darauf verlassen, und warum ist das unerwünscht?
-3. `config.Load` meldet „want a positive integer“ als formatierten String. Schreibe einen eigenen Typ `*FieldError` mit Variablenname und Wert, gib ihn in `num` zurück und schreibe einen Test, der mit `errors.As` alle fehlerhaften Variablennamen aus dem `Join`-Fehler einsammelt.
-4. Baue in einen Handler absichtlich ein `panic("boom")` ein, starte upwatch und rufe den Endpunkt mit `curl -i` auf. Was steht im Log, was bekommt der Client? Was passiert, wenn du die Panik stattdessen in einer mit `go` gestarteten Goroutine auslöst?
+1. **Aufwärmen:** Ersetze in `Describe` in [fehler/main.go](../beispiele/05-fehlerbehandlung/fehler/main.go) das `%w` durch `%v` und führe `go test ./beispiele/05-fehlerbehandlung/...` aus. Welcher Test schlägt fehl und warum? Mach die Änderung danach rückgängig.
+2. **Aufwärmen:** Ersetze in `handleError` das `errors.As` durch `errors.AsType`. Laufen die Tests in `internal/httpapi` weiterhin durch?
+3. **Kern:** Ändere in `sqlitestore.Store.Target` das Wrapping so, dass zusätzlich `sql.ErrNoRows` mit `%w` eingepackt wird (Tipp: `fmt.Errorf` akzeptiert seit Go 1.20 mehrere `%w`). Welcher Code außerhalb des Stores könnte sich jetzt darauf verlassen, und warum ist das unerwünscht?
+4. **Profi:** `config.Load` meldet „want a positive integer“ als formatierten String. Schreibe einen eigenen Typ `*FieldError` mit Variablenname und Wert, gib ihn in `num` zurück und schreibe einen Test, der mit `errors.As` alle fehlerhaften Variablennamen aus dem `Join`-Fehler einsammelt. (Tipp: `errors.As` liefert nur den ersten Treffer; für alle brauchst du `Unwrap() []error`.)
 
 ---
 

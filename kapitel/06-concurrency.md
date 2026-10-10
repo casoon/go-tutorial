@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel kannst du Goroutines, Channels, `select`, `WaitGroup` und `Mutex` gezielt einsetzen, einen Worker-Pool mit sauberem Shutdown bauen und die zwei typischen Fehler – Leaks und Data Races – erkennen und vermeiden.
 
+> **upwatch in diesem Teil:** der Worker-Pool in [scheduler.go](../internal/scheduler/scheduler.go) und seine Tests in [scheduler_test.go](../internal/scheduler/scheduler_test.go)
+> **Voraussetzungen:** Teil 03 bis 05
+
 ## `go doSomething()`
 
 Nebenläufigkeit beginnt in Go mit einem Schlüsselwort:
@@ -15,7 +18,7 @@ go check(target)
 Drei Eigenschaften überraschen Umsteiger:
 
 - Eine Goroutine hat keinen Rückgabewert und kein Handle. Es gibt kein `Task<T>` und kein `Promise`, das man später abfragen könnte. Ergebnisse und Fehler musst du selbst zurückmelden, meist über einen Channel.
-- Man kann eine Goroutine nicht von außen beenden. Sie endet, wenn ihre Funktion zurückkehrt. Wer sie stoppen will, muss ihr das mitteilen – über einen Channel oder einen Context (Kapitel 7).
+- Man kann eine Goroutine nicht von außen beenden. Sie endet, wenn ihre Funktion zurückkehrt. Wer sie stoppen will, muss ihr das mitteilen – über einen Channel oder einen Context (Teil 07).
 - Wenn `main` zurückkehrt, endet das Programm, egal wie viele Goroutines noch laufen. Es wird auf niemanden gewartet.
 
 Das folgende Programm gibt deshalb wahrscheinlich gar nichts aus:
@@ -43,6 +46,16 @@ async Task<int> CheckAsync(string url, CancellationToken ct)
 `await` gibt den Thread frei, solange auf das Netzwerk gewartet wird. Der Preis: Die Funktion wird `async`, ihr Rückgabetyp wird `Task<int>`, und jeder Aufrufer, der nicht blockieren will, muss selbst `async` werden. Die Eigenschaft „asynchron“ breitet sich durch die Aufrufkette aus. Dafür hat sich der Begriff „Function Coloring“ eingebürgert: Es gibt rote (async) und blaue (sync) Funktionen, und sie lassen sich nicht frei mischen.
 
 In Go gibt es diese Unterscheidung nicht. `client.Do(req)` *blockiert* die aufrufende Goroutine, bis die Antwort da ist. Die Laufzeit parkt die Goroutine, registriert den Socket beim Netpoller des Betriebssystems (epoll, kqueue, IOCP) und lässt den Thread in der Zwischenzeit andere Goroutines ausführen. Was C# mit `await` im Code markiert, erledigt Go unsichtbar im Scheduler.
+
+Die naheliegendste Analogie kommt aus Java: Virtual Threads (seit Java 21) funktionieren genauso. Code blockiert ganz normal, und die JVM parkt den virtuellen Thread, solange er auf I/O wartet. Der Unterschied liegt in der Verbreitung: In Java sind Virtual Threads eine Option neben Plattform-Threads und reaktiven Bibliotheken, in Go ist die Goroutine das einzige Modell, und jede Bibliothek ist dafür geschrieben.
+
+| Aufgabe | C# | Java | TypeScript | Go |
+|---|---|---|---|---|
+| leichtgewichtige Einheit | `Task` mit `async`/`await` | Virtual Thread | `Promise` auf einer Event-Loop | Goroutine |
+| starten | `Task.Run(...)` | `Thread.startVirtualThread(...)` | `async`-Funktion aufrufen | `go f()` |
+| auf alle warten | `Task.WhenAll` | `CountDownLatch`, `ExecutorService.invokeAll` | `Promise.all` | `sync.WaitGroup` |
+| Werte weiterreichen | `Channel<T>` (`System.Threading.Channels`) | `BlockingQueue` | – | `chan T` |
+| Ergebnis abholen | `await task` | `future.get()` | `await promise` | kein Handle, meist über einen Channel |
 
 Für den Code heißt das: Jede Funktion ist synchron geschrieben. `check.Checker.Check` in [check.go](../internal/check/check.go) ist eine gewöhnliche Funktion, die ein Ergebnis zurückgibt. Ob sie parallel läuft, entscheidet nicht sie selbst, sondern der Aufrufer – der Scheduler, der sie in mehreren Goroutines startet. Bibliotheken bieten deshalb in Go fast immer blockierende APIs an, und das ist richtig so: Nebenläufigkeit ist eine Entscheidung der Anwendung, nicht der Bibliothek.
 
@@ -118,6 +131,8 @@ case <-ctx.Done():
 }
 ```
 
+Zwei Bausteine darin sind neu. `ctx.Done()` ist ein Channel, der beim Abbruch geschlossen wird – Details in Teil 07; bis dahin reicht: Ein Receive darauf kehrt zurück, sobald upwatch herunterfahren soll. `ticker` stammt aus `time.NewTicker(s.tick)`. Ein Ticker liefert über seinen Channel `ticker.C` in festen Abständen einen Wert; der Dispatcher wartet also bis zum nächsten Takt oder bis zum Abbruch, je nachdem, was zuerst kommt. `defer ticker.Stop()` hält ihn an, wenn der Dispatcher endet.
+
 Ohne das `select` würde `jobs <- t` beim Shutdown ewig blockieren, wenn kein Worker mehr annimmt. Mit `default` wird `select` nicht-blockierend: Ist kein Fall bereit, läuft sofort der `default`-Zweig. Und ein `nil`-Channel blockiert für immer, wodurch man einzelne Fälle in einer `select`-Schleife gezielt abschalten kann, indem man die Variable auf `nil` setzt.
 
 ## `sync.WaitGroup`
@@ -148,7 +163,7 @@ wg.Wait()
 
 upwatch verwendet ausschließlich diese Form. Dass die Closure `t` direkt benutzen darf, liegt an einer Änderung in Go 1.22: Seitdem bekommt jede Schleifeniteration eine eigene Variable. Vorher teilten sich alle Goroutines dieselbe, und man sah überall `t := t` als Workaround. In älterem Code findest du das noch.
 
-Die Dokumentation von `WaitGroup.Go` enthält einen Satz, der leicht überlesen wird: Die Funktion darf nicht paniken. Eine Panik in einer Goroutine beendet ohnehin das ganze Programm (Kapitel 5), aber `Go` ist nicht dafür gebaut, sie aufzufangen.
+Die Dokumentation von `WaitGroup.Go` enthält einen Satz, der leicht überlesen wird: Die Funktion darf nicht paniken. Eine Panik in einer Goroutine beendet ohnehin das ganze Programm (Teil 05), aber `Go` ist nicht dafür gebaut, sie aufzufangen.
 
 ## `sync.Mutex`: wenn geteilter Zustand einfacher ist
 
@@ -168,7 +183,7 @@ func (s *Stats) Record(status int) {
 }
 ```
 
-Konventionen: Der Mutex steht direkt über den Feldern, die er schützt, ist ein Wert (kein Zeiger) und wird nie kopiert – deshalb haben solche Typen Pointer-Receiver, und `go vet` warnt, wenn du einen `Mutex` kopierst. `Lock` und `defer Unlock` gehören zusammen. `sync.RWMutex` erlaubt beliebig viele gleichzeitige Leser oder einen Schreiber; das lohnt sich, wenn deutlich mehr gelesen als geschrieben wird, wie im In-Memory-Store in Kapitel 8. Für einzelne Zähler gibt es `sync/atomic` mit Typen wie `atomic.Int64`.
+Konventionen: Der Mutex steht direkt über den Feldern, die er schützt, ist ein Wert (kein Zeiger) und wird nie kopiert – deshalb haben solche Typen Pointer-Receiver, und `go vet` warnt, wenn du einen `Mutex` kopierst. `Lock` und `defer Unlock` gehören zusammen. `sync.RWMutex` erlaubt beliebig viele gleichzeitige Leser oder einen Schreiber; das lohnt sich, wenn deutlich mehr gelesen als geschrieben wird, wie im In-Memory-Store in Teil 08. Für einzelne Zähler gibt es `sync/atomic` mit Typen wie `atomic.Int64`.
 
 Im Test des Schedulers schützt ein Mutex die Fake-Datenbank, weil Dispatcher und Writer gleichzeitig darauf zugreifen ([scheduler_test.go](../internal/scheduler/scheduler_test.go)). Der echte SQLite-Store braucht keinen eigenen, denn `*sql.DB` ist bereits für gleichzeitige Nutzung gebaut.
 
@@ -176,13 +191,77 @@ Im Test des Schedulers schützt ein Mutex die Fake-Datenbank, weil Dispatcher un
 
 Jetzt kommt alles zusammen. Der Scheduler in [scheduler.go](../internal/scheduler/scheduler.go) prüft alle fälligen Ziele mit einer festen Zahl von Workern. Sein Paketkommentar zeigt den Datenfluss:
 
-```
+```text
 ticker ─► ClaimDue ─► jobs ─┬─► worker ─┐
                             ├─► worker ─┼─► results ─► writer ─► SaveResult
                             └─► worker ─┘
 ```
 
 Links holt ein Dispatcher in jedem Takt die fälligen Ziele aus der Datenbank und schiebt sie in `jobs`. Mehrere Worker lesen aus demselben Channel – das ist *Fan-out*: Arbeit wird auf mehrere Goroutines verteilt, und wer gerade frei ist, nimmt sich das nächste Ziel. Alle Worker schreiben in denselben Channel `results`, aus dem genau ein Writer liest – das ist *Fan-in*.
+
+### Erst ohne Datenbank: das reduzierte Beispiel
+
+[pool/main.go](../beispiele/06-concurrency/pool/main.go) hat dieselbe Struktur, aber statt Datenbank und HTTP nur einen simulierten Check, der zwischen 50 und 150 ms dauert. Starte es zuerst:
+
+```bash
+go run ./beispiele/06-concurrency/pool
+```
+
+```text
+https://site00.example 200 75ms
+https://site03.example 200 88ms
+https://site02.example 200 106ms
+https://site01.example 200 115ms
+...
+https://site11.example 200 100ms
+https://site10.example 200 129ms
+12 checks with 4 workers in 360ms
+```
+
+Zwei Dinge fallen auf. Die Reihenfolge ist nicht die der Eingabe: `site03` ist vor `site02` fertig, weil sein Check kürzer war. Und zwölf Checks von durchschnittlich 100 ms brauchen mit vier Workern nicht 1,2 Sekunden, sondern etwa ein Drittel davon. Starte das Programm mehrmals; Reihenfolge und Laufzeit ändern sich jedes Mal, weil die Dauer zufällig ist.
+
+Der Kern ist die Funktion `Run`:
+
+```go
+func Run(ctx context.Context, urls []string, workers int, check CheckFunc) []Result {
+	jobs := make(chan string)
+	results := make(chan Result)
+
+	// Fan-out: several workers receive from the same channel.
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for u := range jobs {
+				results <- check(ctx, u)
+			}
+		})
+	}
+
+	// Fan-in: one goroutine collects from the shared results channel.
+	var out []Result
+	collected := make(chan struct{})
+	go func() {
+		defer close(collected)
+		for r := range results {
+			out = append(out, r)
+		}
+	}()
+
+	dispatch(ctx, urls, jobs)
+
+	close(jobs)    // 1. no more jobs: workers leave their range loops
+	wg.Wait()      // 2. all workers gone: nobody sends on results
+	close(results) // 3. collector leaves its range loop
+	<-collected    // 4. out is complete and no longer written to
+	return out
+}
+```
+
+`dispatch` schickt jede URL mit dem `select` von oben in `jobs`. Die vier nummerierten Zeilen am Ende sind das Herunterfahren; dazu gleich mehr.
+
+### Jetzt mit Datenbank und Writer
+
+Der echte Scheduler hat dieselbe Form. Statt einer festen URL-Liste holt der Dispatcher in jedem Takt fällige Ziele aus der Datenbank, und statt einer Goroutine, die Ergebnisse in ein Slice sammelt, speichert ein Writer jedes Ergebnis:
 
 ```go
 func (s *Scheduler) Run(ctx context.Context) {
@@ -238,7 +317,7 @@ Einige Entscheidungen darin sind nicht offensichtlich.
 
 ### Die Shutdown-Reihenfolge
 
-Die vier Zeilen am Ende von `Run` sind der Kern des sauberen Herunterfahrens. Die Reihenfolge ergibt sich aus einer einzigen Regel: Ein Channel darf erst geschlossen werden, wenn garantiert niemand mehr darauf sendet.
+Die fünf Schritte am Ende von `Run` sind der Kern des sauberen Herunterfahrens. Die Reihenfolge ergibt sich aus einer einzigen Regel: Ein Channel darf erst geschlossen werden, wenn garantiert niemand mehr darauf sendet.
 
 1. `s.dispatch(ctx, jobs)` kehrt zurück, wenn `ctx` abgebrochen wird. Ab jetzt sendet niemand mehr auf `jobs`.
 2. `close(jobs)` – die Worker beenden ihre `range`-Schleife, sobald sie ihren aktuellen Check abgeschlossen haben.
@@ -248,59 +327,15 @@ Die vier Zeilen am Ende von `Run` sind der Kern des sauberen Herunterfahrens. Di
 
 Vertauschst du zwei Schritte, gibt es Fehler. `close(results)` vor `workers.Wait()` führt zur Panik, wenn ein Worker noch ein Ergebnis senden will. Fehlt `<-writerDone`, schließt `main` womöglich die Datenbank, während der Writer noch schreibt. Fehlt `close(jobs)`, warten die Worker ewig und `workers.Wait()` kehrt nie zurück.
 
-Dass der Writer während des Shutdowns überhaupt noch speichern kann, obwohl `ctx` bereits abgebrochen ist, liegt an `context.WithoutCancel` – das ist Thema in Kapitel 7.
+Dass der Writer während des Shutdowns überhaupt noch speichern kann, obwohl `ctx` bereits abgebrochen ist, liegt an `context.WithoutCancel` – das ist Thema in Teil 07.
 
-### Dasselbe Muster, reduziert
+### Testen mit virtueller Zeit
 
-[pool/main.go](../beispiele/06-concurrency/pool/main.go) zeigt die Struktur ohne Datenbank und echtes HTTP. Der simulierte Check dauert zwischen 50 und 150 ms:
+Der Test des Pools ([pool/main_test.go](../beispiele/06-concurrency/pool/main_test.go)) prüft die Laufzeit exakt, obwohl die Checks Zeit brauchen. Dafür sorgt `testing/synctest`; die Übungen dieses Kapitels brauchen es, ausführlich erklärt wird es in Teil 11.
 
-```go
-func Run(ctx context.Context, urls []string, workers int, check CheckFunc) []Result {
-	jobs := make(chan string)
-	results := make(chan Result)
+> **synctest in fünf Sätzen:** `synctest.Test(t, func(t *testing.T) { … })` (seit Go 1.25) führt den Test in einer *Bubble* aus, zu der jede darin gestartete Goroutine gehört. In der Bubble läuft eine Fake-Uhr: `time.Now`, `time.Sleep`, Timer und Ticker benutzen virtuelle Zeit. Diese Zeit läuft nur weiter, wenn alle Goroutines der Bubble blockiert sind, und springt dann direkt zum nächsten Zeitpunkt, an dem etwas aufwacht. `synctest.Wait()` wartet, bis alle anderen Goroutines der Bubble blockiert sind, damit der Test einen stabilen Zustand prüft. Bleibt am Ende eine Goroutine dauerhaft blockiert, schlägt der Test fehl, statt zu hängen – Details in Teil 11.
 
-	// Fan-out: several workers receive from the same channel.
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Go(func() {
-			for u := range jobs {
-				results <- check(ctx, u)
-			}
-		})
-	}
-
-	// Fan-in: one goroutine collects from the shared results channel.
-	var out []Result
-	collected := make(chan struct{})
-	go func() {
-		defer close(collected)
-		for r := range results {
-			out = append(out, r)
-		}
-	}()
-
-	dispatch(ctx, urls, jobs)
-
-	close(jobs)    // 1. no more jobs: workers leave their range loops
-	wg.Wait()      // 2. all workers gone: nobody sends on results
-	close(results) // 3. collector leaves its range loop
-	<-collected    // 4. out is complete and no longer written to
-	return out
-}
-```
-
-```bash
-go run ./beispiele/06-concurrency/pool
-```
-
-```
-...
-https://site10.example 200 99ms
-https://site11.example 200 148ms
-12 checks with 4 workers in 360ms
-```
-
-Die Laufzeit schwankt wegen der zufälligen Dauer. Der Test dazu ist trotzdem exakt, weil er in einer `testing/synctest`-Blase läuft (seit Go 1.25): Dort ist die Zeit virtuell und springt vorwärts, sobald alle Goroutines blockieren. Zehn Checks à 100 ms auf drei Workern brauchen genau vier Runden:
+Zehn Checks à 100 ms auf drei Workern brauchen damit genau vier Runden, und der Test kann auf die Millisekunde prüfen:
 
 ```go
 synctest.Test(t, func(t *testing.T) {
@@ -316,7 +351,53 @@ synctest.Test(t, func(t *testing.T) {
 })
 ```
 
-Der echte Scheduler wird genauso getestet; Kapitel 11 geht darauf genauer ein.
+`t.Context()` ist ein Context, der mit dem Test endet; mehr dazu in Teil 07.
+
+## Jetzt du: ein Worker oder acht
+
+Am echten upwatch siehst du den Pool, wenn die Checks langsam sind. [langsam/main.go](../beispiele/06-concurrency/langsam/main.go) ist eine absichtlich langsame Website, die jede Anfrage nach einer Sekunde beantwortet. Starte sie in einem Terminal:
+
+```bash
+go run ./beispiele/06-concurrency/langsam
+```
+
+In einem zweiten Terminal upwatch mit einem einzigen Worker, einer frischen Datenbank und einem Takt von einer Sekunde. `UPWATCH_ALLOW_PRIVATE_TARGETS=true` erlaubt Checks gegen `127.0.0.1`, die upwatch sonst ablehnt (Teil 13):
+
+```bash
+export UPWATCH_DB="$(mktemp -d)/upwatch.db"
+UPWATCH_WORKERS=1 UPWATCH_TICK=1s UPWATCH_ALLOW_PRIVATE_TARGETS=true \
+  UPWATCH_ADDR=localhost:8090 go run ./cmd/upwatch
+```
+
+Im dritten Terminal vier Ziele anlegen und nach ein paar Sekunden die Ergebnisse abfragen:
+
+```bash
+for p in a b c d; do
+  curl -s -X POST localhost:8090/targets -d "{\"url\":\"http://127.0.0.1:18101/$p\"}" > /dev/null
+done
+sleep 6
+for id in 1 2 3 4; do curl -s localhost:8090/targets/$id/results; echo; done
+```
+
+Achte auf `checked_at`. Mit einem Worker liegen die Checks genau eine Sekunde auseinander, weil jeder auf den vorigen wartet:
+
+```text
+[{"id":1,"status_code":200,"duration_ms":1008,"up":true,"checked_at":"2026-10-10T21:18:21.613Z"}]
+[{"id":2,"status_code":200,"duration_ms":1001,"up":true,"checked_at":"2026-10-10T21:18:22.621Z"}]
+[{"id":3,"status_code":200,"duration_ms":1001,"up":true,"checked_at":"2026-10-10T21:18:23.623Z"}]
+[{"id":4,"status_code":200,"duration_ms":1001,"up":true,"checked_at":"2026-10-10T21:18:24.624Z"}]
+```
+
+Beende upwatch mit Ctrl+C, setze mit einem neuen `export UPWATCH_DB=…` eine frische Datenbank und wiederhole das Ganze mit `UPWATCH_WORKERS=8`. Jetzt starten alle vier Checks in derselben Millisekunde:
+
+```text
+[{"id":2,"status_code":200,"duration_ms":1008,"up":true,"checked_at":"2026-10-10T21:18:29.822Z"}]
+[{"id":3,"status_code":200,"duration_ms":1008,"up":true,"checked_at":"2026-10-10T21:18:29.822Z"}]
+[{"id":1,"status_code":200,"duration_ms":1008,"up":true,"checked_at":"2026-10-10T21:18:29.823Z"}]
+[{"id":4,"status_code":200,"duration_ms":1008,"up":true,"checked_at":"2026-10-10T21:18:29.822Z"}]
+```
+
+Auch das Log der langsamen Website zeigt den Unterschied: einmal vier Zeilen im Sekundenabstand, einmal vier Zeilen mit demselben Zeitstempel. Beende danach beide Programme mit Ctrl+C.
 
 ## Wer sendet, schließt
 
@@ -435,14 +516,16 @@ Goroutines sind billig, aber nicht kostenlos – und vor allem ist nebenläufige
 **Verträgt die Gegenseite es?** Die Anzahl gleichzeitiger Zugriffe sollte immer begrenzt sein. upwatch begrenzt Checks über die Zahl der Worker (`UPWATCH_WORKERS`) und Schreibzugriffe über den einzelnen Writer. Für einmalige Fan-outs ohne festen Pool reicht ein gepufferter Channel als Semaphor:
 
 ```go
+var wg sync.WaitGroup
 sem := make(chan struct{}, 4) // at most 4 at a time
 for _, t := range targets {
 	wg.Go(func() {
-		sem <- struct{}{}
-		defer func() { <-sem }()
+		sem <- struct{}{}        // blocks while 4 checks are running
+		defer func() { <-sem }() // frees the slot
 		check(t)
 	})
 }
+wg.Wait()
 ```
 
 **Wie kommen Fehler zurück?** Sequenziell ist das ein `return err`. Parallel brauchst du einen Weg, Fehler zu sammeln und bei Bedarf die übrigen Goroutines abzubrechen. Das Modul `golang.org/x/sync/errgroup` (nicht Teil der Standardbibliothek, aber vom Go-Team gepflegt) bündelt `WaitGroup`, ersten Fehler und Context-Abbruch; upwatch braucht es nicht, weil Checks ihre Fehler im Ergebnis tragen.
@@ -461,10 +544,10 @@ Die Server-Grundstruktur ist in Go ohnehin schon nebenläufig: `net/http` starte
 
 ## Übungen
 
-1. Vertausche in `Scheduler.Run` die Zeilen `workers.Wait()` und `close(results)`. Die bestehenden Tests bleiben grün – warum? Schreibe einen Fake-Checker, der `ctx` ignoriert und nach dem Abbruch noch ein Ergebnis liefert, und einen `synctest`-Test, der die Panik „send on closed channel“ auslöst. Stelle danach die Reihenfolge wieder her.
-2. Gib dem `jobs`-Channel im Scheduler einen Puffer von 100. Welche Auswirkung hat das auf `ClaimDue` und auf Ziele, die beim Shutdown im Puffer liegen? Schreibe einen `synctest`-Test, der das sichtbar macht.
-3. Schreibe `First` aus dem Leak-Beispiel so um, dass es einen `context.Context` annimmt, nach der ersten Antwort abbricht und die anderen Goroutines über `select` auf `ctx.Done()` aussteigen lässt. Prüfe mit dem `synctest`-Test, dass nichts leckt.
-4. Ersetze in `beispiele/06-concurrency/race` den Mutex in `Stats` durch zwei Felder vom Typ `atomic.Int64`, eines für Erfolge und eines für Fehler. Was gewinnst du, was verlierst du gegenüber der Map mit Mutex?
+1. **Aufwärmen:** Ändere in `beispiele/06-concurrency/pool/main.go` die Zahl der Worker auf 1, dann auf 12, und starte das Programm jeweils dreimal. Erkläre die Laufzeiten. Warum bringen 24 Worker bei zwölf URLs nichts mehr?
+2. **Kern:** Ersetze in `beispiele/06-concurrency/race` den Mutex in `Stats` durch zwei Felder vom Typ `atomic.Int64`, eines für Erfolge und eines für Fehler. Prüfe mit `go test -race`. Was gewinnst du, was verlierst du gegenüber der Map mit Mutex?
+3. **Kern:** Schreibe `First` aus dem Leak-Beispiel so um, dass es nach der ersten Antwort einen Channel `done chan struct{}` schließt und die anderen Goroutines über `select` zwischen ihrem Send und `<-done` aussteigen lassen – ganz ohne Puffer. Prüfe mit dem `synctest`-Test aus `leak/main_test.go` (siehe Kasten oben), dass nichts leckt.
+4. **Profi:** Vertausche in `Scheduler.Run` die Zeilen `workers.Wait()` und `close(results)`. Die bestehenden Tests bleiben grün – warum? Schreibe einen Fake-Checker, der `ctx` ignoriert und nach dem Abbruch noch ein Ergebnis liefert, und einen `synctest`-Test, der die Panik „send on closed channel“ auslöst. Die Grundlagen stehen im Kasten oben, die Details zu Bubbles und `synctest.Wait` in Teil 11. Stelle danach die Reihenfolge wieder her.
 
 ---
 

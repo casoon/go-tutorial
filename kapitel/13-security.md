@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel weißt du, welche Sicherheitsentscheidungen in einem Go-Server explizit getroffen werden müssen, welche die Standardbibliothek dir abnimmt und warum ein URL-Monitor wie upwatch ein ganz eigenes Risiko mitbringt: Server-Side Request Forgery.
 
+> **upwatch in diesem Teil:** die Server-Timeouts in [main.go](../cmd/upwatch/main.go), der SSRF-Schutz in [check.go](../internal/check/check.go), Eingabegrenzen in [httpapi.go](../internal/httpapi/httpapi.go) und [monitor.go](../internal/monitor/monitor.go)
+> **Voraussetzungen:** Teil 07 (Context), Teil 08 (HTTP-API), Teil 12 (Konfiguration, Debug-Listener)
+
 ## Was Go dir abnimmt und was nicht
 
 Go hat ein paar Klassen von Fehlern einfach nicht. Es gibt keine Pufferüberläufe im C-Sinn, weil Slices und Strings Grenzen prüfen und ein Zugriff außerhalb mit einem Panic endet statt mit fremdem Speicher. Es gibt keine Deserialisierung, die beliebige Klassen instanziiert, wie man sie aus Javas `ObjectInputStream` oder alten .NET-Formattern kennt: `encoding/json` füllt genau den Typ, den du übergibst. Und die Kryptografie liegt in der Standardbibliothek, gepflegt vom Go-Team, statt in einer Sammlung von Drittpaketen.
@@ -36,12 +39,18 @@ srv := &http.Server{
 }
 ```
 
-Die vier Timeouts schützen verschiedene Phasen einer Verbindung:
+Die vier Timeouts schützen verschiedene Phasen einer Verbindung. Auf einer Zeitachse sieht ein Request mit anschließendem Keep-alive so aus:
 
-- `ReadHeaderTimeout` begrenzt die Zeit bis zum Ende der Request-Header. Das ist der direkte Schutz gegen Slowloris.
-- `ReadTimeout` begrenzt das Lesen des ganzen Requests inklusive Body. upwatch nimmt nur kleine JSON-Bodies an, zehn Sekunden sind großzügig.
-- `WriteTimeout` läuft ab dem Ende der Request-Header bis zum Ende der Antwort. Ein Client, der die Antwort extrem langsam abholt, hält die Verbindung damit nicht beliebig lange.
-- `IdleTimeout` gilt für Keep-alive-Verbindungen zwischen zwei Requests. Ohne ihn fällt Go auf `ReadTimeout` zurück.
+```text
+Verbindung angenommen
+├─ Header lesen ──────────┼─ Body lesen ──┼─ Handler + Antwort ─┼─ Idle (Keep-alive) ───┼─ nächster Request …
+├─ ReadHeaderTimeout 5 s ─┤               │                     │                       │
+├─────────── ReadTimeout 10 s ────────────┤                     │                       │
+│                         ├───────── WriteTimeout 30 s ─────────┤                       │
+│                         │               │                     ├── IdleTimeout 120 s ──┤
+```
+
+`ReadHeaderTimeout` ist der direkte Schutz gegen Slowloris. `ReadTimeout` begrenzt Header und Body zusammen; upwatch nimmt nur kleine JSON-Bodies an, zehn Sekunden sind großzügig. `WriteTimeout` beginnt nach den Request-Headern und endet mit der Antwort, sodass ein Client, der die Antwort extrem langsam abholt, die Verbindung nicht beliebig lange hält. `IdleTimeout` gilt zwischen zwei Requests auf einer Keep-alive-Verbindung; ohne ihn fällt Go auf `ReadTimeout` zurück.
 
 `MaxHeaderBytes` begrenzt die Größe von Request-Zeile und Headern. Der Default (`http.DefaultMaxHeaderBytes`) ist 1 MiB; upwatch braucht keine großen Header und setzt 16 KiB.
 
@@ -154,14 +163,7 @@ upwatch liest seine Konfiguration aus Umgebungsvariablen ([config.go](../interna
 
 `Environment=` steht in der Unit, die oft im Repository liegt und von `systemctl show` für jeden lesbar ausgegeben wird. Eine `EnvironmentFile` mit Rechten `0600`, die root gehört, hält den Wert aus beidem heraus. In Kubernetes übernimmt ein Secret diese Rolle, in Docker Compose `secrets:` oder eine `.env`-Datei außerhalb des Repositorys.
 
-Die zweite Stelle, an der Secrets auslaufen, sind Logs. upwatch loggt beim Start Adresse und Datenbankpfad, nicht die komplette Konfiguration, und die Request-Middleware loggt `r.URL.Path`, nicht die volle URL mit Query-String, in dem Tokens stehen könnten. Wenn du einen Wert hast, der nie im Log landen darf, gib ihm einen eigenen Typ, der `slog.LogValuer` implementiert:
-
-```go
-// Token never shows up in logs, even if someone logs the whole config.
-type Token string
-
-func (Token) LogValue() slog.Value { return slog.StringValue("REDACTED") }
-```
+Die zweite Stelle, an der Secrets auslaufen, sind Logs. upwatch loggt beim Start Adresse und Datenbankpfad, nicht die komplette Konfiguration, und die Request-Middleware loggt `r.URL.Path`, nicht die volle URL mit Query-String, in dem Tokens stehen könnten. Einen Wert, der nie im Log landen darf, gibst du einen eigenen Typ mit `slog.LogValuer`, wie in Teil 12 gezeigt.
 
 Für das Vergleichen solcher Werte nimmst du `crypto/subtle.ConstantTimeCompare` statt `==`, damit die Laufzeit des Vergleichs nichts über die Anzahl übereinstimmender Bytes verrät.
 
@@ -285,9 +287,29 @@ if cfg.AllowPrivate {
 }
 ```
 
-Der Schalter ist bewusst ein expliziter Opt-in mit einem Namen, den niemand versehentlich setzt, und der Default ist sicher. In Produktion hat er nichts verloren. Die Tests in `check_test.go` nutzen `NewClient(true)`, weil `httptest.Server` immer auf Loopback lauscht.
+Der Schalter ist ein expliziter Opt-in mit einem Namen, den niemand versehentlich setzt, und der Default ist sicher. Für Produktionsumgebungen ist er nicht vorgesehen; dort bleibt er aus. Die Tests in `check_test.go` nutzen `NewClient(true)`, weil `httptest.Server` immer auf Loopback lauscht.
 
 Der Schutz hat Grenzen, die du kennen solltest. Er verhindert nicht, dass upwatch öffentliche Ziele mit hoher Frequenz abfragt – die Intervallgrenze und eine Begrenzung der Zielanzahl pro Nutzer wären dafür zuständig. Und es gibt exotischere Adressbereiche (etwa NAT64-Präfixe, die auf IPv4-Adressen abbilden), die `isPublic` nicht kennt. Netzwerkseitige Regeln (eine Firewall, die ausgehenden Verkehr des Dienstes ins interne Netz sperrt) sind die zweite Verteidigungslinie, die ein Code-Check nicht ersetzt.
+
+### Jetzt du: der Schutz greift
+
+Starte upwatch ohne `UPWATCH_ALLOW_PRIVATE_TARGETS` und lege ein Ziel an, das auf upwatch selbst zeigt:
+
+```bash
+go build -o upwatch ./cmd/upwatch
+UPWATCH_ADDR=127.0.0.1:18120 UPWATCH_DB="$(mktemp -d)/upwatch.db" UPWATCH_TICK=1s ./upwatch &
+PID=$!
+curl -s -X POST localhost:18120/targets -d '{"url":"http://localhost:18120/healthz"}'
+sleep 2; kill $PID
+```
+
+Das Anlegen klappt (`201`, die URL ist gültig), aber der erste Check scheitert im Dialer, bevor eine Verbindung entsteht:
+
+```
+time=2026-10-10T23:19:06.658+02:00 level=WARN msg="target down" target_id=1 status=0 err="Get \"http://localhost:18120/healthz\": dial tcp [::1]:18120: ::1: forbidden address" duration=3.292875ms
+```
+
+Eine Zeile `msg=request method=GET path=/healthz` fehlt im Log – der Request hat upwatch nie erreicht. Wiederhole den Lauf mit `UPWATCH_ALLOW_PRIVATE_TARGETS=true` und vergleiche.
 
 ## Den HTTP-Server absichern
 
@@ -327,7 +349,7 @@ func (a *API) serverError(w http.ResponseWriter, r *http.Request, err error) {
 
 ### Debug-Endpunkte nur auf localhost
 
-pprof-Profile verraten Funktionsnamen und interne Struktur, `/debug/pprof/cmdline` zeigt die Kommandozeile, und ein CPU-Profil-Request bindet den Prozess für die angefragte Dauer. Deshalb hängen diese Endpunkte nicht am API-Router, sondern an einem zweiten Listener, der nur startet, wenn `UPWATCH_DEBUG_ADDR` gesetzt ist:
+pprof-Profile verraten Funktionsnamen und interne Struktur, `/debug/pprof/cmdline` zeigt die Kommandozeile, und ein CPU-Profil-Request bindet den Prozess für die angefragte Dauer. `/debug/vars` von `expvar` zeigt Speicherstatistiken und die Kommandozeile ebenfalls. Deshalb hängen diese Endpunkte nicht am API-Router, sondern an einem zweiten Listener, der nur startet, wenn `UPWATCH_DEBUG_ADDR` gesetzt ist (Teil 12):
 
 ```go
 if cfg.DebugAddr != "" {
@@ -335,7 +357,7 @@ if cfg.DebugAddr != "" {
 }
 ```
 
-Gesetzt wird er auf `127.0.0.1:6060`, nie auf `:6060`. Ein häufiger Fehler ist ein blankes `import _ "net/http/pprof"`: Dieses Package registriert seine Handler beim Import im `http.DefaultServeMux`. Wer dann irgendwo `http.ListenAndServe(addr, nil)` nutzt, veröffentlicht pprof auf dem öffentlichen Port. upwatch registriert die pprof-Handler deshalb explizit an einem eigenen Mux. Wie du den Debug-Listener benutzt, zeigt Teil 14.
+Gesetzt wird er auf `127.0.0.1:6060`, nie auf `:6060`. Die eigentliche Falle steckt im Import: `net/http/pprof` und `expvar` registrieren ihre Handler beim Import selbst auf `http.DefaultServeMux`. Ein blankes `import _ "net/http/pprof"` plus irgendwo ein `http.ListenAndServe(addr, nil)` – `nil` heißt `DefaultServeMux` – veröffentlicht `/debug/pprof/` und `/debug/vars` auf dem öffentlichen Port, ohne dass eine Zeile Routing-Code danach aussieht. upwatch benutzt `DefaultServeMux` nirgends: Die API hat ihren eigenen `ServeMux` (Teil 08), und `serveDebug` registriert die pprof-Handler und `expvar.Handler()` explizit an einem zweiten. Wie du den Debug-Listener benutzt, zeigt Teil 14.
 
 ### Ohne Rechte laufen
 
@@ -347,18 +369,25 @@ upwatch hat keine Authentifizierung. Wer die API erreicht, kann Ziele anlegen un
 
 ## Sicherheitsfunktionen der Standardbibliothek
 
-Einiges, was in anderen Ökosystemen ein Drittpaket braucht, ist in Go eingebaut:
+Einiges, was in anderen Ökosystemen ein Drittpaket braucht, ist in Go eingebaut. Für .NET-Entwickler die nächsten Gegenstücke:
 
-- `html/template` escapt kontextabhängig: in HTML-Text anders als in Attributen, in `<script>` anders als in URLs. Wer `text/template` für HTML benutzt, verliert das. Der Unterschied ist ein Import – der häufigste Fehler in diesem Bereich.
-- `crypto/rand` liefert kryptografisch sichere Zufallszahlen. `crypto/rand.Text()` (seit Go 1.24) erzeugt einen zufälligen Token als String, etwa für API-Keys. `math/rand/v2` ist dafür nicht gedacht.
-- `crypto/subtle.ConstantTimeCompare` für Vergleiche von Tokens und Signaturen, `crypto/hmac` für signierte Werte, `crypto/sha256` und Co. für Hashes. Für Passwort-Hashing gibt es `golang.org/x/crypto/bcrypt` und `argon2` im erweiterten Ökosystem.
-- `net/netip` stellt IP-Adressen als kleine, vergleichbare Werttypen dar, mit den Klassifizierungsmethoden, die `isPublic` nutzt.
-- `os.Root` (seit Go 1.24) beschränkt Dateizugriffe auf einen Verzeichnisbaum. `root.Open("../../etc/passwd")` scheitert, auch über Symlinks. Das ersetzt die fehleranfällige Prüfung mit `filepath.Clean` und `strings.HasPrefix`, wenn ein Pfad aus einer Benutzereingabe stammt.
-- `http.CrossOriginProtection` (seit Go 1.25) ist eine CSRF-Middleware. Sie lehnt nicht-sichere Cross-Origin-Requests von Browsern anhand der Header `Sec-Fetch-Site` und `Origin` ab, ohne Tokens in Formularen. Für upwatch als JSON-API ohne Cookies ist sie nicht nötig; sobald eine Web-Oberfläche mit Session-Cookie dazukommt, schon.
+| Go | Zweck | .NET |
+|---|---|---|
+| `html/template` | kontextabhängiges Escaping in HTML, Attributen, `<script>`, URLs | Razor-Encoding von `@`-Ausdrücken |
+| `crypto/rand`, `rand.Text()` (seit Go 1.24) | sichere Zufallswerte, Tokens als String | `RandomNumberGenerator` |
+| `crypto/subtle.ConstantTimeCompare` | Vergleich ohne Timing-Leck | `CryptographicOperations.FixedTimeEquals` |
+| `crypto/hmac`, `crypto/sha256` | Signaturen, Hashes | `HMACSHA256`, `SHA256` |
+| `net/netip` | IP-Adressen als vergleichbare Werttypen mit Klassifizierung | `IPAddress`, `IPNetwork` |
+| `os.Root` (seit Go 1.24) | Dateizugriff auf einen Verzeichnisbaum beschränken | kein direktes Gegenstück |
+| `http.CrossOriginProtection` (seit Go 1.25) | CSRF-Schutz | Antiforgery (`[ValidateAntiForgeryToken]`) |
+
+Drei Zeilen der Tabelle verdienen einen Satz mehr. `html/template` schützt nur, wenn man es auch importiert: `text/template` hat dieselbe API und escapt nichts, der Unterschied ist ein Import und der häufigste Fehler in diesem Bereich. `os.Root` lässt `root.Open("../../etc/passwd")` scheitern, auch über Symlinks, und ersetzt die fehleranfällige Prüfung mit `filepath.Clean` und `strings.HasPrefix`, wenn ein Pfad aus einer Benutzereingabe stammt. `http.CrossOriginProtection` arbeitet anders als Antiforgery ohne Tokens in Formularen: Es lehnt nicht-sichere Cross-Origin-Requests von Browsern anhand der Header `Sec-Fetch-Site` und `Origin` ab. Für upwatch als JSON-API ohne Cookies ist das nicht nötig; sobald eine Web-Oberfläche mit Session-Cookie dazukommt, schon:
 
 ```go
 handler := http.NewCrossOriginProtection().Handler(mux)
 ```
+
+Für Passwort-Hashing gibt es `golang.org/x/crypto/bcrypt` und `argon2` im erweiterten Ökosystem des Go-Teams, nicht in der Standardbibliothek. `math/rand/v2` ist für Tokens nicht gedacht.
 
 ## Abhängigkeiten prüfen: govulncheck
 
@@ -370,7 +399,7 @@ Ausführen lässt es sich ohne Installation:
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
-Am 10. Oktober 2026 mit govulncheck v1.8.0 und dem lokal installierten Go 1.27.1 lieferte das für upwatch (gekürzt):
+Am 10. Oktober 2026 mit govulncheck v1.8.0 und dem lokal installierten Go 1.27.1 lieferte das für upwatch (gekürzt). Deine Ausgabe wird anders aussehen – sie hängt von Go-Version und Datum ab.
 
 ```
 === Symbol Results ===
@@ -422,10 +451,10 @@ In upwatch läuft govulncheck als Schritt in [.github/workflows/ci.yml](../.gith
 
 ## Übungen
 
-1. Schreib eine Middleware `requireToken(token string, next http.Handler) http.Handler`, die `Authorization: Bearer <token>` mit `subtle.ConstantTimeCompare` prüft und sonst 401 antwortet. Lies den Token in `config.Load` aus `UPWATCH_API_TOKEN` und gib ihm einen Typ mit `LogValue`, der ihn im Log verbirgt. `/healthz` und `/readyz` sollen ohne Token erreichbar bleiben.
-2. Ergänze `TestIsPublic` um weitere Adressen: `224.0.0.1` (Multicast), `198.18.0.1` (Benchmark-Netz), `240.0.0.1` (reserviert) und `64:ff9b::7f00:1` (NAT64-Abbildung von `127.0.0.1`). Welche hält `isPublic` für öffentlich? Erweitere die Funktion um eine Liste zusätzlich verbotener Präfixe.
-3. Begrenze die Anzahl der Ziele: `POST /targets` soll mit 409 oder 422 antworten, wenn bereits 500 Ziele existieren. Wo gehört die Grenze hin – in die Domäne, die API oder den Store? Begründe deine Wahl.
-4. Führe `govulncheck` in deinem Projekt aus und dann mit `-show verbose`. Ordne jede Meldung einer der drei Stufen zu und überlege, welche davon ein Release blockieren sollte.
+1. **Kern (empfohlen):** Schreib eine Middleware `requireToken(token string, next http.Handler) http.Handler`, die `Authorization: Bearer <token>` mit `subtle.ConstantTimeCompare` prüft und sonst 401 antwortet. Lies den Token in `config.Load` aus `UPWATCH_API_TOKEN` und gib ihm einen Typ mit `LogValue`, der ihn im Log verbirgt. `/healthz` und `/readyz` sollen ohne Token erreichbar bleiben.
+2. **Kern:** Ergänze `TestIsPublic` um weitere Adressen: `224.0.0.1` (Multicast), `198.18.0.1` (Benchmark-Netz), `240.0.0.1` (reserviert) und `64:ff9b::7f00:1` (NAT64-Abbildung von `127.0.0.1`). Welche hält `isPublic` für öffentlich? Erweitere die Funktion um eine Liste zusätzlich verbotener Präfixe.
+3. **Profi:** Begrenze die Anzahl der Ziele: `POST /targets` soll mit 409 oder 422 antworten, wenn bereits 500 Ziele existieren. Wo gehört die Grenze hin – in die Domäne, die API oder den Store? Begründe deine Wahl.
+4. **Aufwärmen:** Führe `govulncheck` in upwatch oder einem eigenen Projekt aus, zuerst normal und dann ausführlich: `go run golang.org/x/vuln/cmd/govulncheck@latest -show verbose ./...`. Ordne jede Meldung einer der drei Stufen zu und überlege, welche davon ein Release blockieren sollte.
 
 ---
 

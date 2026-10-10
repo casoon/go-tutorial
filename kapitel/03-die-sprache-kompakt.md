@@ -2,7 +2,46 @@
 
 Nach diesem Kapitel kannst du Go-Code lesen und selbst schreiben: Variablen, Typen, Kontrollfluss, Slices, Maps, Structs, Methoden, Pointer, Generics und `defer`. Das Kapitel ist bewusst kein Nachschlagewerk – es konzentriert sich auf das, was anders ist als in C# und TypeScript.
 
-Die Beispiele liegen unter [beispiele/03-die-sprache-kompakt](../beispiele/03-die-sprache-kompakt/) und lassen sich mit `go run` starten und mit `go test` prüfen.
+> **upwatch in diesem Teil:** die Domänentypen `Target` und `Result` in [internal/monitor/monitor.go](../internal/monitor/monitor.go); die Beispiele liegen unter [beispiele/03-die-sprache-kompakt](../beispiele/03-die-sprache-kompakt/)
+> **Voraussetzungen:** Teil 01 und 02 (`go run`, `go test`)
+
+## Jetzt du: erst ausführen, dann lesen
+
+Bevor es um Details geht, starte das Beispiel, das die meisten Themen dieses Kapitels auf einer Seite zeigt:
+
+```bash
+go run ./beispiele/03-die-sprache-kompakt/grundlagen
+```
+
+```
+Hello, Ada
+https://example.com checked 2 times, every 1m0s
+scheme: https rest: example.com
+unknown 1
+up      1
+down    1
+done (deferred, runs last)
+```
+
+Öffne danach [grundlagen/main.go](../beispiele/03-die-sprache-kompakt/grundlagen/main.go), ändere in `main` den Statuscode `503` auf `302` und starte erneut. Zwei Zeilen der Ausgabe ändern sich: `up` steigt auf 2, `down` fällt auf 0. Die Zeile `done …` steht weiterhin am Ende, obwohl sie im Code als Erstes kommt – warum, erklärt der Abschnitt über `defer`. Mach die Änderung danach rückgängig.
+
+## Spickzettel: von C#, Java und TypeScript nach Go
+
+Die Tabelle ordnet zu, was du kennst. Jede Zeile wird weiter unten oder in einem späteren Teil erklärt.
+
+| C# | Java | TypeScript | Go |
+|---|---|---|---|
+| `var x = 1;` | `var x = 1;` | `let x = 1;` | `x := 1` |
+| `class` mit Methoden | `class` mit Methoden | `class` | `struct` plus Methoden |
+| `class A : IFoo` | `class A implements Foo` | `class A implements Foo` | nichts – Interfaces werden implizit erfüllt |
+| `List<T>`, `T[]` | `ArrayList<T>`, `T[]` | `T[]` | Slice `[]T` |
+| `Dictionary<K,V>` | `HashMap<K,V>` | `Map<K,V>` | `map[K]V` |
+| `null` | `null` | `null`, `undefined` | `nil` bzw. Zero Value |
+| `try`/`catch` | `try`/`catch` | `try`/`catch` | `error` als Rückgabewert (Teil 05) |
+| `using`, `finally` | try-with-resources, `finally` | `finally` | `defer` |
+| `async`/`await`, `Task` | Virtual Threads, `CompletableFuture` | `async`/`await`, `Promise` | Goroutine (Teil 06) |
+| `public` | `public` | `export` | Großbuchstabe am Namensanfang |
+| Konstruktor | Konstruktor | `constructor` | Funktion `New…` |
 
 ## Variablen und Konstanten
 
@@ -30,7 +69,7 @@ const (
 )
 ```
 
-Go hat kein `enum`-Schlüsselwort. Ein eigener Typ mit Konstanten deckt den Großteil ab, ist aber nicht abgeschlossen: `Status(42)` kompiliert. Damit `Status` lesbar ausgegeben wird, bekommt er eine Methode `String()` – mehr dazu bei Interfaces. Dass der erste Wert `StatusUnknown` ist, ist Absicht: Ein vergessenes Feld hat dann einen ehrlichen Wert statt zufällig „up“.
+Go hat kein `enum`-Schlüsselwort. Ein eigener Typ mit Konstanten deckt den Großteil ab, ist aber nicht abgeschlossen: `Status(42)` kompiliert. Damit `Status` lesbar ausgegeben wird, bekommt er eine Methode `String()` – mehr dazu bei Interfaces. Der erste Wert heißt `StatusUnknown`, weil er zugleich der Zero Value ist: Ein vergessenes Feld hat dann einen ehrlichen Wert statt zufällig „up“.
 
 ## Datentypen
 
@@ -50,12 +89,12 @@ Zweitens sind Strings unveränderliche Byte-Folgen, meist UTF-8. `len(s)` liefer
 ## if und switch
 
 ```go
-if scheme, rest, ok := splitURL(t.URL); ok {
+if scheme, rest, ok := splitURL("https://example.com"); ok {
 	fmt.Println("scheme:", scheme, "rest:", rest)
 }
 ```
 
-Keine Klammern um die Bedingung, geschweifte Klammern sind Pflicht. Vor der Bedingung darf eine Anweisung stehen, deren Variablen nur im `if`/`else` sichtbar sind. Dieses Muster wirst du bei Fehlern ständig sehen: `if err := f(); err != nil { … }`.
+Keine Klammern um die Bedingung, geschweifte Klammern sind Pflicht. Vor der Bedingung darf eine Anweisung stehen, deren Variablen nur im `if`/`else` sichtbar sind. Dieses Muster wirst du bei Fehlern ständig sehen: `if err := f(); err != nil { … }`. Die Funktion `splitURL` mit ihren drei Rückgabewerten kommt weiter unten bei den Funktionen.
 
 `switch` bricht nach jedem Fall ab, ein `break` ist nicht nötig (für den seltenen Fall des Durchfallens gibt es `fallthrough`). Ohne Ausdruck ersetzt `switch` eine `if`-`else`-Kette:
 
@@ -83,14 +122,15 @@ for i := 0; i < 3; i++ { … }      // classic
 for status >= 500 { … }           // like while
 for { … }                         // endless, leave with break or return
 for i, r := range results { … }   // index and element
-for range s.workers { … }         // n times, since Go 1.22
+for range 3 { … }                 // n times, since Go 1.22
 ```
 
-`range` funktioniert über Slices, Arrays, Strings, Maps, Channels, Funktionen (Iteratoren) und seit Go 1.22 auch über Ganzzahlen. Der Scheduler von upwatch startet seine Worker genau so:
+`range` funktioniert über Slices, Arrays, Strings, Maps, Channels, Funktionen (Iteratoren) und seit Go 1.22 auch über Ganzzahlen. Ein kleines Beispiel, das die URLs einer Liste nummeriert ausgibt:
 
 ```go
-for range s.workers {
-	workers.Go(func() { s.work(ctx, jobs, results) })
+urls := []string{"https://example.com", "https://example.org"}
+for i, u := range urls {
+	fmt.Printf("%d: %s\n", i+1, u)
 }
 ```
 
@@ -143,7 +183,7 @@ prefix := all[:2:2]          // len 2, cap 2
 prefix = append(prefix, 404) // no room: append allocates a new array
 ```
 
-Oder du kopierst ausdrücklich mit `slices.Clone`. Die Faustregel: Gibt eine Funktion einen Teil eines internen Slices heraus oder speichert sie einen übergebenen Slice, sollte sie kopieren, wenn der Aufrufer ihn danach noch verändern könnte. Der `fakeStore` in [scheduler_test.go](../internal/scheduler/scheduler_test.go) gibt in `ClaimDue` einen Teil-Slice heraus, ohne zu kopieren. Das ist dort unbedenklich, weil an `pending` danach nie mehr angehängt wird – aber genau diese Überlegung musst du bei jedem solchen Teil-Slice anstellen.
+Oder du kopierst ausdrücklich mit `slices.Clone`. Die Faustregel: Gibt eine Funktion einen Teil eines internen Slices heraus oder speichert sie einen übergebenen Slice, sollte sie kopieren, wenn der Aufrufer ihn danach noch verändern könnte.
 
 Das Paket `slices` der Standardbibliothek enthält die Operationen, die du aus LINQ oder von `Array.prototype` kennst: `slices.Contains`, `slices.Index`, `slices.Sort`, `slices.SortFunc`, `slices.Equal`, `slices.MaxFunc` und weitere.
 
@@ -161,7 +201,7 @@ delete(counts, StatusDown)
 
 Eine Map entspricht `Dictionary<K,V>` oder `Map<K,V>`. Ein fehlender Schlüssel liefert den Zero Value statt einer Exception; ob er existiert, verrät die zweite Rückgabe. Schlüssel müssen vergleichbar sein (`==`), Slices sind es nicht.
 
-Zwei Dinge musst du wissen: Die Iterationsreihenfolge ist absichtlich zufällig – wer eine Reihenfolge braucht, sortiert die Schlüssel. Und eine `nil`-Map kann gelesen, aber nicht beschrieben werden; das Schreiben löst eine Panic aus. Deshalb `map[K]V{}` oder `make(map[K]V)`. Maps sind nicht für gleichzeitigen Zugriff aus mehreren Goroutines gedacht; dafür braucht es einen Mutex (Teil 06).
+Drei Dinge solltest du wissen. Die Iterationsreihenfolge ist zufällig; wer eine Reihenfolge braucht, sortiert die Schlüssel. Eine `nil`-Map – etwa ein Struct-Feld, das nie initialisiert wurde – kann gelesen, aber nicht beschrieben werden: Das Schreiben bricht das Programm mit einer *Panic* ab, Gos Gegenstück zu einer unbehandelten Exception (Teil 05). Deshalb legst du Maps mit `map[K]V{}` oder `make(map[K]V)` an. Und eine Map ist nicht dafür gebaut, dass mehrere gleichzeitig laufende Funktionen sie verändern; wie man sie dann schützt, zeigt Teil 06.
 
 ## Structs
 
@@ -215,16 +255,36 @@ func splitURL(raw string) (scheme, rest string, ok bool) {
 }
 ```
 
-Die Rückgaben können wie hier Namen haben; das dokumentiert, was zurückkommt. Werte, die du nicht brauchst, ignorierst du mit `_`. Funktionen sind Werte: Du kannst sie Variablen zuweisen, übergeben und als Closures zurückgeben. Lambdas schreibst du als `func(x int) int { return x * 2 }` – länger als `x => x * 2`, aber ohne Sonderregeln.
+Die Rückgaben können wie hier Namen haben; das dokumentiert, was zurückkommt. Werte, die du nicht brauchst, ignorierst du mit `_`. Überladung gibt es nicht. Zwei Funktionen mit unterschiedlichen Parametern brauchen unterschiedliche Namen. Default-Parameter gibt es ebenfalls nicht; stattdessen übergibt man einen Struct mit Optionen oder nutzt den Zero Value als „Standard“, wie `NewTarget` mit dem Intervall `0`.
 
-Überladung gibt es nicht. Zwei Funktionen mit unterschiedlichen Parametern brauchen unterschiedliche Namen. Default-Parameter gibt es ebenfalls nicht; stattdessen übergibt man einen Struct mit Optionen oder nutzt den Zero Value als „Standard“, wie `NewTarget` mit dem Intervall `0`.
+### Funktionen als Werte und Closures
+
+Funktionen sind Werte: Du kannst sie Variablen zuweisen, übergeben und zurückgeben. Lambdas schreibst du als `func(x int) int { return x * 2 }` – länger als `x => x * 2`, aber ohne Sonderregeln. Eine Funktion, die Variablen aus ihrer Umgebung verwendet, ist eine Closure. upwatch nutzt das in `config.Load` in [config.go](../internal/config/config.go), um dieselbe Prüfung nicht für jede Umgebungsvariable neu auszuschreiben (gekürzt):
+
+```go
+var errs []error
+num := func(key string, dst *int) {
+	if v := getenv(key); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			errs = append(errs, fmt.Errorf("%s: want a positive integer, got %q", key, v))
+			return
+		}
+		*dst = n
+	}
+}
+
+num("UPWATCH_WORKERS", &cfg.Workers)
+```
+
+`num` ist eine lokale Variable vom Typ `func(string, *int)`. Sie verwendet `getenv` (den Parameter von `Load`) und `errs` aus der umgebenden Funktion; ein `append` innerhalb der Closure verändert die äußere Variable `errs`. Das Ziel bekommt sie als Pointer `dst` – was `&cfg.Workers` und `*dst = n` bedeuten, zeigt der Abschnitt über Pointer.
 
 ## Methoden: Value- oder Pointer-Receiver
 
-Eine Methode ist eine Funktion mit einem Receiver. Der Receiver ist entweder ein Wert oder ein Pointer, und das macht einen echten Unterschied:
+Eine Methode ist eine Funktion mit einem Receiver. Der Receiver ist entweder ein Wert oder ein Pointer, und das macht einen echten Unterschied. Das folgende `Target` ist ein vereinfachter Beispieltyp aus [grundlagen/main.go](../beispiele/03-die-sprache-kompakt/grundlagen/main.go), nicht der upwatch-Typ `monitor.Target` – das Feld `checks` gibt es nur im Beispiel:
 
 ```go
-// Value receiver: works on a copy, cannot change t.
+// Value receiver: works on a copy, cannot change r.
 func (r Result) Status() Status { … }
 
 // Pointer receiver: works on the original.
@@ -244,7 +304,7 @@ In C# ist `this` in einer Klasse immer eine Referenz. In Go entscheidest du pro 
 
 ## Pointer
 
-Ein Pointer `*T` zeigt auf einen Wert vom Typ `T`. `&x` nimmt die Adresse, `*p` liest den Wert. Pointer-Arithmetik gibt es nicht (außer über das Paket `unsafe`), und der Garbage Collector sorgt dafür, dass ein Wert lebt, solange jemand auf ihn zeigt. Du kannst also problemlos die Adresse einer lokalen Variablen zurückgeben:
+Ein Pointer `*T` zeigt auf einen Wert vom Typ `T`. `&x` nimmt die Adresse, `*p` liest den Wert, `*p = v` schreibt ihn. Pointer-Arithmetik gibt es nicht (außer über das Paket `unsafe`), und der Garbage Collector sorgt dafür, dass ein Wert lebt, solange jemand auf ihn zeigt. Du kannst also problemlos die Adresse einer lokalen Variablen zurückgeben:
 
 ```go
 func newStats() *Stats {
@@ -253,7 +313,7 @@ func newStats() *Stats {
 }
 ```
 
-Pointer brauchst du aus zwei Gründen: um etwas zu verändern, das dir übergeben wurde, und um zu teilen statt zu kopieren. Der Scheduler in upwatch ist ein `*Scheduler`, weil es genau eine Instanz geben soll, die alle verwenden. Für „optional“ verwendet man Pointer in Go seltener als `T?` in C#; meist trägt der Zero Value die Bedeutung „nicht gesetzt“.
+Pointer brauchst du aus zwei Gründen: um etwas zu verändern, das dir übergeben wurde (wie `dst` in der Closure oben), und um zu teilen statt zu kopieren. Der Scheduler in upwatch ist ein `*Scheduler`, weil es genau eine Instanz geben soll, die alle verwenden. Für „optional“ verwendet man Pointer in Go seltener als `T?` in C#; meist trägt der Zero Value die Bedeutung „nicht gesetzt“.
 
 Ein `nil`-Pointer ist das Go-Gegenstück zur `NullReferenceException`: Der Zugriff löst eine Panic aus. Go hat keine Nullable Reference Types wie C# und keine `strictNullChecks` wie TypeScript. Die Verteidigung ist Konvention: Funktionen, die einen Pointer und einen `error` zurückgeben, liefern bei `err == nil` einen gültigen Pointer.
 
@@ -313,7 +373,14 @@ all up: false
 
 Die eingebauten Constraints sind `any` (jeder Typ) und `comparable` (Typen, die `==` unterstützen und als Map-Schlüssel taugen). Weitere wie `cmp.Ordered` liefert die Standardbibliothek. [main.go](../beispiele/03-die-sprache-kompakt/generics/main.go) enthält noch `Map` mit zwei Typparametern und `GroupBy`, das `comparable` für den Schlüssel braucht.
 
-Gegenüber C# fehlt einiges, und das ist gewollt: Es gibt keine Varianz (`out T`/`in T`), keine Spezialisierung und keine Constraints der Art „hat einen parameterlosen Konstruktor“. Methoden mit eigenen Typparametern erlaubt Go erst seit 1.27, und auch dann nur an konkreten Typen – Interface-Methoden dürfen keine Typparameter haben. Weil die `go.mod` von upwatch `go 1.26.0` verlangt, meldet der Compiler im Repository für eine solche Methode „generic method requires go1.27 or later“. Gegenüber TypeScript fehlen bedingte und gemappte Typen. Go-Generics sind für Container und Algorithmen gedacht, nicht für Typ-Akrobatik.
+Gegenüber C# fehlt einiges: Es gibt keine Varianz (`out T`/`in T`), keine Spezialisierung und keine Constraints der Art „hat einen parameterlosen Konstruktor“. Gegenüber TypeScript fehlen bedingte und gemappte Typen. Go-Generics sind für Container und Algorithmen gedacht, nicht für Typ-Akrobatik.
+
+<details>
+<summary>Methoden mit eigenen Typparametern</summary>
+
+Methoden mit eigenen Typparametern erlaubt Go erst seit 1.27, und auch dann nur an konkreten Typen – Interface-Methoden dürfen keine Typparameter haben. Weil die `go.mod` von upwatch `go 1.26.0` verlangt, meldet der Compiler im Repository für eine solche Methode „generic method requires go1.27 or later“, auch wenn lokal Go 1.27 installiert ist: Die `go`-Zeile in `go.mod` bestimmt den Sprachstand (Teil 02).
+
+</details>
 
 ### Wann nicht
 
@@ -354,9 +421,9 @@ if err != nil {
 defer resp.Body.Close()
 ```
 
-Das ist Gos Gegenstück zu `using` in C# und `try`/`finally` in TypeScript. Der Vorteil: Das Aufräumen steht direkt neben dem Anfordern. Mehrere `defer` laufen in umgekehrter Reihenfolge (LIFO). Die Argumente werden beim `defer` ausgewertet, nicht erst beim Ausführen.
+Das ist Gos Gegenstück zu `using` in C#, try-with-resources in Java und `try`/`finally` in TypeScript. Der Vorteil: Das Aufräumen steht direkt neben dem Anfordern. Mehrere `defer` laufen in umgekehrter Reihenfolge (LIFO). Die Argumente werden beim `defer` ausgewertet, nicht erst beim Ausführen. Im Beispiel `grundlagen` steht `defer fmt.Println("done …")` in der ersten Zeile von `main` und erscheint trotzdem als letzte Ausgabe.
 
-Die häufigsten Verwendungen in upwatch sind `defer cancel()` nach `context.WithTimeout`, `defer mu.Unlock()` nach `mu.Lock()`, `defer tx.Rollback()` nach `BeginTx` (nach einem erfolgreichen `Commit` ist das ein harmloser No-op) und `defer store.Close()` in [main.go](../cmd/upwatch/main.go).
+Zwei Verwendungen siehst du in upwatch immer wieder: `defer mu.Unlock()` direkt nach `mu.Lock()`, damit eine Sperre auch bei einem frühen `return` freigegeben wird, und `defer store.Close()` in [main.go](../cmd/upwatch/main.go), damit die Datenbank beim Beenden geschlossen wird.
 
 Eine Falle: `defer` in einer Schleife läuft erst am Ende der Funktion, nicht am Ende der Iteration. Wer in einer Schleife Dateien öffnet, lagert den Schleifenrumpf in eine eigene Funktion aus.
 
@@ -364,15 +431,15 @@ Eine Falle: `defer` in einer Schleife läuft erst am Ende der Funktion, nicht am
 
 - [internal/monitor/monitor.go](../internal/monitor/monitor.go) – Structs (`Target`, `Result`), Konstanten (`MinInterval` …), eine Methode mit Value-Receiver (`Result.Up`), ein Konstruktor mit Validierung (`NewTarget`) und ein eigener Fehlertyp (`ValidationError`).
 - [internal/scheduler/scheduler.go](../internal/scheduler/scheduler.go) – `for range s.workers`, Pointer-Receiver auf `*Scheduler`, `defer ticker.Stop()`.
-- [internal/config/config.go](../internal/config/config.go) – Closures (`str`, `num`, `dur`), die über Pointer auf Felder der Config schreiben.
-- [internal/check/check.go](../internal/check/check.go) – `defer cancel()` und `defer resp.Body.Close()`.
+- [internal/config/config.go](../internal/config/config.go) – Closures (`str`, `num`, `dur`, `boolean`), die über Pointer auf Felder der Config schreiben.
+- [internal/check/check.go](../internal/check/check.go) – `defer resp.Body.Close()`.
 
 ## Übungen
 
-1. Ergänze in [grundlagen/main.go](../beispiele/03-die-sprache-kompakt/grundlagen/main.go) einen Status `StatusDegraded` für Antworten, die zwar erfolgreich, aber langsamer als 2 Sekunden sind. Wo musst du überall etwas ändern, und welcher Test fällt dir als Erstes ein?
-2. Schreib eine Funktion `Uptime(results []monitor.Result) float64`, die den Anteil erfolgreicher Prüfungen berechnet, und nutze `Result.Up()`. Brauchst du dafür Generics?
-3. Erweitere [generics/main.go](../beispiele/03-die-sprache-kompakt/generics/main.go) um eine Funktion `Percentile[T cmp.Ordered](values []T, p float64) T`. Achte darauf, dass sie den übergebenen Slice nicht umsortiert – siehe Aliasing.
-4. Lies `config.Load` in [config.go](../internal/config/config.go). Welche Variablen erfassen die Closures `num` und `dur`, und warum bekommen sie einen Pointer auf das Ziel-Feld statt eines Rückgabewerts?
+1. **Aufwärmen:** Schreib eine Funktion `Uptime(results []monitor.Result) float64`, die den Anteil erfolgreicher Prüfungen berechnet, und nutze `Result.Up()`. Was gibst du für einen leeren Slice zurück, und brauchst du Generics?
+2. **Kern:** Ergänze in [grundlagen/main.go](../beispiele/03-die-sprache-kompakt/grundlagen/main.go) einen Status `StatusDegraded` für Antworten, die zwar erfolgreich, aber langsamer als 2 Sekunden sind. Wo musst du überall etwas ändern (denk an `String` und an die Schleife in `main`), und welchen Testfall ergänzt du in `TestResultStatus`?
+3. **Kern:** Die Closure `num` aus `config.Load` (oben gezeigt) schreibt über `*dst = n` in die Config. Schreib eine Variante, die stattdessen den Wert zurückgibt (`func(key string, def int) int`), und rufe sie für `UPWATCH_WORKERS` auf. Was wird an der Aufrufstelle länger, und wie kommt der Default jetzt hinein?
+4. **Profi:** Erweitere [generics/main.go](../beispiele/03-die-sprache-kompakt/generics/main.go) um eine Funktion `Percentile[T cmp.Ordered](values []T, p float64) T`. Achte darauf, dass sie den übergebenen Slice nicht umsortiert – siehe Aliasing –, und schreib einen Test, der genau das prüft.
 
 ---
 

@@ -106,10 +106,13 @@ func run() error {
 	// canceled ctx and drains its workers in parallel.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	err = srv.Shutdown(shutdownCtx)
+	// Wait for the scheduler even if Shutdown timed out: the deferred
+	// store.Close must not run while workers still use the database.
+	wg.Wait()
+	if err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
-	wg.Wait()
 
 	logger.Info("stopped")
 	return nil

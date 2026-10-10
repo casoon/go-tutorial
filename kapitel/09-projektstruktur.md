@@ -2,6 +2,9 @@
 
 Nach diesem Kapitel weißt du, wie man ein Go-Projekt in Packages aufteilt, warum upwatch genau so aussieht und woran du überkomplizierte Strukturen erkennst, bevor du sie übernimmst.
 
+> **upwatch in diesem Teil:** die Aufteilung in [cmd/upwatch](../cmd/upwatch/main.go) und die Packages unter [internal/](../internal/), zusammengesteckt in [main.go](../cmd/upwatch/main.go)
+> **Voraussetzungen:** Teil 02 und 04; Teil 06 bis 08 helfen, die Packages einzuordnen
+
 ## Das Problem mit den Vorlagen aus dem Internet
 
 Wer „go project structure“ sucht, landet schnell bei Repositories mit zwanzig Top-Level-Verzeichnissen: `api/`, `build/`, `configs/`, `deployments/`, `pkg/`, `internal/app/`, `internal/pkg/`, `init/`, `scripts/`, `tools/`, `web/` und so weiter. Das bekannteste ist `golang-standards/project-layout`. Der Name klingt offiziell, ist es aber nicht: Das Repository gehört keiner Go-Organisation, die README räumt selbst ein, dass es kein offizieller Standard des Go-Teams ist, und Mitglieder des Go-Teams haben dem Anspruch öffentlich widersprochen. Es ist eine Sammlung von Mustern, die man in großen Projekten beobachten kann – nicht der Ausgangspunkt für einen Service mit sieben Packages.
@@ -50,7 +53,7 @@ package example.com/other
 	main.go:3:8: use of internal package github.com/casoon/go-tutorial/internal/monitor not allowed
 ```
 
-Das ist echte Ausgabe – erzeugt mit einem kleinen Testmodul, das per `replace` auf upwatch zeigt. Für C#-Entwickler ist das am ehesten `internal` auf Assembly-Ebene, nur dass es für ganze Verzeichnisbäume gilt und keine `InternalsVisibleTo`-Ausnahme kennt.
+Das ist echte Ausgabe – erzeugt mit einem kleinen Testmodul, das per `replace` auf upwatch zeigt. Für C#-Entwickler ist das am ehesten `internal` auf Assembly-Ebene, nur dass es für ganze Verzeichnisbäume gilt und keine `InternalsVisibleTo`-Ausnahme kennt. In Java kommt das Modulsystem am nächsten: Packages, die `module-info.java` nicht exportiert, sind für andere Module unsichtbar – in Go genügt dafür der Verzeichnisname.
 
 Der praktische Nutzen: Alles unter `internal/` kannst du umbenennen, umbauen oder löschen, ohne dass irgendjemand außerhalb deines Moduls davon betroffen ist. Für eine Anwendung ist das der richtige Default. Ein `pkg/`-Verzeichnis, das in vielen Vorlagen auftaucht, hat dagegen keine Sonderbedeutung – es ist eine Konvention, die signalisieren soll „das hier dürft ihr importieren“. Wenn du keine Bibliothek für andere baust, brauchst du es nicht.
 
@@ -70,26 +73,9 @@ Für Package-Namen gibt es klare Konventionen, und sie haben einen praktischen G
 
 ## Abhängigkeitsrichtung
 
-Die wichtigste Architekturentscheidung in upwatch steht nicht in der Ordnerstruktur, sondern in den Imports. Du kannst sie dir direkt anzeigen lassen:
+Die wichtigste Architekturentscheidung in upwatch steht nicht in der Ordnerstruktur, sondern in den Imports. Wer welches Package importiert, ergibt dieses Bild:
 
-```bash
-go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./cmd/... ./internal/... \
-  | sed 's|github.com/casoon/go-tutorial/||g'
-```
-
-```
-cmd/upwatch: context errors expvar fmt internal/check internal/config internal/httpapi internal/scheduler internal/sqlitestore log/slog net/http net/http/pprof os os/signal sync syscall time
-internal/check: context errors fmt internal/monitor io net net/http net/netip syscall time
-internal/config: errors fmt log/slog os strconv time
-internal/httpapi: context encoding/json errors fmt internal/monitor log/slog net/http strconv time
-internal/monitor: errors fmt net/url strings time
-internal/scheduler: context expvar internal/monitor log/slog sync time
-internal/sqlitestore: context database/sql embed errors fmt internal/monitor io/fs modernc.org/sqlite modernc.org/sqlite/lib net/url sort time
-```
-
-Daraus ergibt sich ein einfaches Bild:
-
-```
+```text
                        cmd/upwatch
         ┌──────────┬───────┼─────────┬────────────┐
         ▼          ▼       ▼         ▼            ▼
@@ -99,6 +85,45 @@ Daraus ergibt sich ein einfaches Bild:
                                 ▼
                              monitor
 ```
+
+## Jetzt du: die Imports selbst ansehen
+
+Das Bild musst du nicht glauben, `go list` zeigt es dir. Der Befehl gibt für jedes Package die direkten Imports aus; `sed` kürzt den Modulpfad weg:
+
+```bash
+go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./cmd/... ./internal/... \
+  | sed 's|github.com/casoon/go-tutorial/||g'
+```
+
+Prüfe in der Ausgabe zwei Dinge: `monitor` importiert kein anderes Package aus `internal/`, und keines der Packages in der mittleren Reihe importiert ein anderes aus derselben Reihe.
+
+<details><summary>Ausgabe von <code>go list</code></summary>
+
+```text
+cmd/upwatch: context errors expvar fmt internal/check internal/config internal/httpapi internal/scheduler internal/sqlitestore log/slog net/http net/http/pprof os os/signal sync syscall time
+internal/check: context errors fmt internal/monitor io net net/http net/netip syscall time
+internal/config: errors fmt log/slog os strconv time
+internal/httpapi: context encoding/json errors fmt internal/monitor log/slog net/http strconv time
+internal/monitor: errors fmt net/url strings time unicode
+internal/scheduler: context expvar internal/monitor log/slog sync time
+internal/sqlitestore: context database/sql embed errors fmt internal/monitor io/fs modernc.org/sqlite modernc.org/sqlite/lib net/url sort time
+```
+
+</details>
+
+Dann der Gegenversuch: Füge in [monitor.go](../internal/monitor/monitor.go) testweise den Import `_ "github.com/casoon/go-tutorial/internal/sqlitestore"` hinzu und starte `go build ./...`:
+
+```text
+package github.com/casoon/go-tutorial/cmd/upwatch
+	imports github.com/casoon/go-tutorial/internal/check from main.go
+	imports github.com/casoon/go-tutorial/internal/monitor from check.go
+	imports github.com/casoon/go-tutorial/internal/sqlitestore from monitor.go
+	imports github.com/casoon/go-tutorial/internal/monitor from store.go: import cycle not allowed
+```
+
+Der Compiler zeigt die ganze Kette bis zum Zyklus. Warum Go das verbietet, steht weiter unten. Nimm die Zeile danach wieder heraus.
+
+## Wer was kennen darf
 
 `monitor` ist ein Blatt: Es importiert nur die Standardbibliothek, und auch dort nichts aus `net/http` oder `database/sql`. Jedes andere Package darf `monitor` importieren, weil dadurch keine Infrastruktur mitkommt. Mit `go list -deps` siehst du den Unterschied in der transitiven Hülle:
 
@@ -139,13 +164,7 @@ Das ist Dependency Injection ohne Container. Die Konstruktoren nehmen ihre Abhä
 
 ## Keine zyklischen Imports
 
-In Go dürfen Packages sich nicht gegenseitig importieren, auch nicht über Umwege. Der Compiler lehnt das ab:
-
-```
-package example.com/cyc/a
-	imports example.com/cyc/b from a.go
-	imports example.com/cyc/a from b.go: import cycle not allowed
-```
+In Go dürfen Packages sich nicht gegenseitig importieren, auch nicht über Umwege. Die Meldung des Compilers hast du in „Jetzt du“ gesehen.
 
 In C# kann Klasse A in Namespace X Klasse B in Namespace Y benutzen und umgekehrt, solange beide in derselben Assembly liegen. Java erlaubt Zyklen zwischen Packages ebenfalls. Go verbietet sie, weil das Package die Einheit für Kompilierung und Initialisierung ist: Jedes Package wird einmal kompiliert, und seine Abhängigkeiten müssen vorher fertig sein. Ohne Zyklen lässt sich das parallelisieren und cachen, und die Reihenfolge der `init`-Funktionen ist eindeutig.
 
@@ -156,22 +175,13 @@ Am Anfang empfindet man das Verbot als Hindernis. In der Praxis ist es eine Arch
 Wer aus ASP.NET oder Spring kommt, erwartet drei Schichten: Controller nehmen Requests an, Services enthalten die Geschäftslogik, Repositories reden mit der Datenbank. In upwatch fehlt die mittlere Schicht. `httpapi` ruft direkt den Store auf:
 
 ```go
-func (a *API) createTarget(w http.ResponseWriter, r *http.Request) {
-	var req createTargetRequest
-	if err := readJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	target, err := monitor.NewTarget(req.URL, time.Duration(req.IntervalSeconds)*time.Second)
-	if err != nil {
-		a.handleError(w, r, err)
-		return
-	}
-	created, err := a.store.CreateTarget(r.Context(), target)
-	// ...
-}
+// in createTarget, after decoding the request:
+target, err := monitor.NewTarget(req.URL, time.Duration(req.IntervalSeconds)*time.Second)
+// ...
+created, err := a.store.CreateTarget(r.Context(), target)
 ```
+
+Den vollständigen Handler zeigt Teil 08.
 
 Das ist Absicht. Eine `TargetService.Create`-Methode würde `monitor.NewTarget` aufrufen und dann `store.CreateTarget` – also exakt das, was der Handler schon tut, nur mit einer zusätzlichen Indirektion, einem zusätzlichen Interface und einem zusätzlichen Test, der nichts prüft, was nicht schon geprüft ist. Die Validierung liegt bereits im Domänen-Package (`NewTarget`), die Persistenz im Store. Dazwischen gibt es keine Logik, die einen Ort bräuchte.
 
@@ -220,10 +230,10 @@ Diese Reihenfolge ist umkehrbar und billig. Das Umziehen eines Packages ist in G
 
 ## Übungen
 
-1. Führe `go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/...` aus und prüfe, dass `monitor` als einziges internes Package keine anderen internen Packages importiert. Füge testweise in `monitor.go` einen Import von `internal/sqlitestore` hinzu und lies die Fehlermeldung. Mach die Änderung danach rückgängig.
-2. Skizziere das oben beschriebene Alarm-Feature als Package `internal/alert`: Welche Interfaces würde es beim Konsumenten definieren, wer würde es aufrufen, und welche Imports bräuchte `main.go` zusätzlich? Schreib nur die Typen und Signaturen, keine Implementierung.
-3. Überlege, was sich ändern müsste, damit `httpapi` und `scheduler` dasselbe `Store`-Interface teilen. Wo müsste es liegen, und warum ist das in upwatch schlechter als zwei kleine Interfaces?
-4. Nimm ein eigenes Projekt aus C# oder Java mit klassischer Schichtenarchitektur und markiere die Services, die nur durchreichen. Wie würde die Struktur in Go aussehen?
+1. **Aufwärmen:** Lege außerhalb des Repos ein Modul `example.com/other` an, das per `replace`-Direktive auf deinen Checkout von upwatch zeigt, und versuche in seinem `main.go`, `internal/monitor` zu importieren. Vergleiche die Meldung mit der im Abschnitt über `internal/`.
+2. **Kern:** Skizziere das oben beschriebene Alarm-Feature als Package `internal/alert`: Welche Interfaces würde es beim Konsumenten definieren, wer würde es aufrufen, und welche Imports bräuchte `main.go` zusätzlich? Schreib nur die Typen und Signaturen, keine Implementierung, und prüfe mit `go list` wie in „Jetzt du“, dass kein Zyklus entsteht.
+3. **Kern:** Überlege, was sich ändern müsste, damit `httpapi` und `scheduler` dasselbe `Store`-Interface teilen. Wo müsste es liegen, und warum ist das in upwatch schlechter als zwei kleine Interfaces?
+4. **Profi:** Nimm ein eigenes Projekt aus C# oder Java mit klassischer Schichtenarchitektur und markiere die Services, die nur durchreichen. Wie würde die Struktur in Go aussehen?
 
 ---
 

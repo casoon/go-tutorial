@@ -1,0 +1,136 @@
+---
+// The course at a glance: every chapter with what it adds to upwatch,
+// grouped like the docs sidebar. Titles and links come from the docs
+// collection; the one-liners below are the only extra text.
+import { getCollection } from 'astro:content';
+import { url } from '@casoon/pages-theme/url';
+
+const groups = [
+  { id: 'grundlagen', label: 'Grundlagen', lead: 'Die Sprache und ihre Denkweise – an Beispielen aus upwatch.' },
+  { id: 'anwendung', label: 'Die Anwendung', lead: 'upwatch entsteht: API, Struktur, Datenbank, Tests, Betrieb.' },
+  { id: 'produktion', label: 'Produktion', lead: 'Absichern, messen, ausliefern – und was Umsteiger falsch machen.' },
+];
+
+const outcome: Record<string, string> = {
+  '01-warum-go': 'upwatch starten und mit curl ausprobieren',
+  '02-toolchain-und-module': 'go build, test, vet, Module und govulncheck',
+  '03-die-sprache-kompakt': 'Structs, Slices, Maps, Interfaces, Generics',
+  '04-go-denkweise': 'Kleine Interfaces, Composition, DI ohne Container',
+  '05-fehlerbehandlung': 'Errors wrappen, prüfen, an der Grenze übersetzen',
+  '06-concurrency': 'Der Worker-Pool des Schedulers',
+  '07-context': 'Abbruch und Timeouts vom Request bis zur Datenbank',
+  '08-http-api': 'Die JSON-API mit net/http und Middleware',
+  '09-projektstruktur': 'cmd/, internal/ und Packages, die tragen',
+  '10-datenbanken': 'SQLite, Transaktionen, Migrationen',
+  '11-testing': 'Tabellen-Tests, httptest, Fakes, synctest, Fuzzing',
+  '12-logging-konfiguration-observability': 'slog, Konfiguration, Metriken, Graceful Shutdown',
+  '13-security': 'Timeouts, Limits, SSRF-Schutz, govulncheck',
+  '14-performance': 'Benchmarks, Escape Analysis, pprof',
+  '15-deployment': 'Ein Binary, systemd, ein distroless Container',
+  '16-best-practices': 'Muster aus C#, Java, TS – und ihre Go-Form',
+};
+
+const docs = await getCollection('docs');
+const chapters = (group: string) =>
+  docs
+    .filter((d) => d.id.startsWith(`${group}/`))
+    .sort((a, b) => a.data.order - b.data.order)
+    .map((d) => {
+      const slug = d.id.split('/')[1];
+      return { n: d.data.order, title: d.data.title, href: url(`docs/${d.id}/`), outcome: outcome[slug] };
+    });
+---
+
+<section class="curriculum" aria-labelledby="curriculum-heading">
+  <h2 id="curriculum-heading" class="cp-label">Der Weg durch das Tutorial</h2>
+  <div class="groups">
+    {
+      groups.map((g) => (
+        <div class="group">
+          <h3>{g.label}</h3>
+          <p class="lead">{g.lead}</p>
+          <ol>
+            {chapters(g.id).map((c) => (
+              <li>
+                <a href={c.href}>
+                  <span class="n" aria-hidden="true">{String(c.n).padStart(2, '0')}</span>
+                  <span>
+                    <span class="title">{c.title}</span>
+                    {c.outcome && <span class="outcome">{c.outcome}</span>}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ))
+    }
+  </div>
+</section>
+
+<style>
+  .curriculum {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+  .groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+    gap: 40px 48px;
+  }
+  h3 {
+    margin: 0 0 4px;
+    color: var(--heading);
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .lead {
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-size: 14.5px;
+    line-height: 1.5;
+  }
+  ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--border);
+  }
+  li {
+    border-bottom: 1px solid var(--border);
+  }
+  a {
+    display: flex;
+    gap: 14px;
+    padding: 11px 4px;
+    color: inherit;
+    text-decoration: none;
+  }
+  a:hover .title,
+  a:focus-visible .title {
+    color: var(--brand);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .n {
+    padding-top: 2px;
+    color: var(--brand);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .title {
+    display: block;
+    color: var(--heading);
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.35;
+  }
+  .outcome {
+    display: block;
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.45;
+  }
+</style>
