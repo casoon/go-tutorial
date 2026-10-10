@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore: ["site/**", "kapitel/**"]
+  push:
+    branches: [main]
+    paths-ignore: ["site/**", "kapitel/**"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # Latest stable release: govulncheck checks the standard library of the
+      # toolchain in use, so an old patch release would fail it rightly.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go test ./beispiele/...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Cross-compile
+        run: make build-all
+
+  # The minimum version from go.mod must still build and pass the tests.
+  minimum-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./...

@@ -1,0 +1,6 @@
+.git
+*.db
+*.db-*
+bin/
+kapitel/
+beispiele/

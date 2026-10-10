@@ -1,0 +1,8 @@
+bin/
+*.db
+*.db-shm
+*.db-wal
+/upwatch
+site/node_modules/
+site/dist/
+site/.astro/

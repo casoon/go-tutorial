@@ -1,0 +1,83 @@
+---
+import {
+  Badge,
+  Badges,
+  CodeBlock,
+  Facts,
+  Features,
+  Hero,
+  Quickstart,
+  Terminal,
+} from '@casoon/pages-theme/components';
+import Base from '@casoon/pages-theme/layouts/Base.astro';
+import { url } from '@casoon/pages-theme/url';
+// Recorded with scripts/hero-session.sh against the real service.
+import session from '../hero-session.ansi?raw';
+
+const chapters = Object.keys(import.meta.glob('../../../kapitel/*.md')).length;
+
+const quickstart = `git clone https://github.com/casoon/go-tutorial
+cd go-tutorial
+make run            # go run ./cmd/upwatch on :8080
+
+curl -s -d '{"url":"https://example.com"}' :8080/targets
+curl -s :8080/targets/1/results`;
+---
+
+<Base>
+  <Hero
+    eyebrow="CASOON Tutorial"
+    title="Go lernen, indem du einen echten Dienst baust."
+    lead="Kein Syntax-Kurs, sondern Go für echte Projekte: In 16 Teilen entsteht upwatch, ein URL-Monitor mit HTTP-API, parallelen Checks, SQLite, Tests, Logging, Graceful Shutdown und einem einzelnen Binary zum Deployen. Für Entwickler, die aus C#, Java oder TypeScript kommen."
+  >
+    <Badges>
+      <Badge>Go 1.26+</Badge>
+      <Badge>nur Standardbibliothek + SQLite</Badge>
+      <Badge>MIT</Badge>
+    </Badges>
+    <Terminal slot="output" title="upwatch" dots ansi={session} />
+  </Hero>
+
+  <Facts
+    items={[
+      { value: String(chapters), label: 'Teile, ein durchgehendes Projekt' },
+      { value: '1', label: 'direkte Abhängigkeit: der SQLite-Treiber, ohne cgo' },
+      { value: '12 MB', label: 'statisches Linux-Binary inklusive Datenbank' },
+      { value: '4', label: 'Zielplattformen aus einem Befehl: make build-all' },
+    ]}
+  />
+
+  <Features
+    heading="Worum es geht"
+    items={[
+      {
+        title: 'Ein Projekt statt 16 Inseln',
+        body: 'Jedes Kapitel erklärt ein Stück von upwatch: Context am echten Request, Concurrency am echten Worker-Pool, Testing an den echten Tests. Kein Todo-Service.',
+      },
+      {
+        title: 'Go-Denkweise statt OOP-Import',
+        body: 'Kleine Interfaces beim Konsumenten, konkrete Structs, explizite Fehler, Dependency Injection ohne Container – und warum IUserService und BaseRepository hier nicht hingehören.',
+      },
+      {
+        title: 'Standardbibliothek zuerst',
+        body: 'net/http mit Routing-Patterns, log/slog, database/sql, expvar, pprof, testing/synctest. Frameworks werden eingeordnet, nicht vorausgesetzt.',
+      },
+      {
+        title: 'Bis in die Produktion',
+        body: 'Timeouts, SSRF-Schutz, govulncheck, Cross-Compilation, distroless Container und eine gehärtete systemd-Unit. Der Code im Repo ist getestet, auch mit dem Race Detector.',
+      },
+    ]}
+  />
+
+  <Quickstart
+    title="Loslegen"
+    lead="Du brauchst Go ab 1.26 und curl. Die Kapitel lesen sich hier oder direkt im Repository."
+    steps={[
+      'Repository klonen und upwatch mit <code>make run</code> starten.',
+      'Eine URL anlegen – der Scheduler prüft sie sofort und danach im Intervall.',
+      `Mit <a href="${url('docs/')}">Teil 1: Warum gibt es Go?</a> beginnen.`,
+    ]}
+  >
+    <CodeBlock code={quickstart} lang="bash" title="Terminal" label="Shell" />
+  </Quickstart>
+</Base>

@@ -1,0 +1,41 @@
+# systemd unit for upwatch.
+#   sudo cp upwatch /usr/local/bin/
+#   sudo cp deploy/upwatch.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now upwatch
+[Unit]
+Description=upwatch URL monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/upwatch
+Environment=UPWATCH_ADDR=127.0.0.1:8080
+Environment=UPWATCH_DB=/var/lib/upwatch/upwatch.db
+Environment=UPWATCH_LOG_JSON=true
+# Secrets would go into a root-only file instead:
+# EnvironmentFile=/etc/upwatch/env
+
+# systemd creates /var/lib/upwatch owned by a throwaway user.
+DynamicUser=yes
+StateDirectory=upwatch
+
+# SIGTERM triggers graceful shutdown; give it time before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+
+# Hardening: the service needs network and its state directory, nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
