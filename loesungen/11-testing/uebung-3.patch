@@ -1,0 +1,20 @@
+diff --git a/internal/monitor/monitor_test.go b/internal/monitor/monitor_test.go
+index 9485d51..e79b85f 100644
+--- a/internal/monitor/monitor_test.go
++++ b/internal/monitor/monitor_test.go
+@@ -8,6 +8,7 @@ import (
+ )
+ 
+ func TestNormalizeURL(t *testing.T) {
++	t.Parallel()
+ 	tests := []struct {
+ 		name    string
+ 		in      string
+@@ -29,6 +30,7 @@ func TestNormalizeURL(t *testing.T) {
+ 
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
++			t.Parallel()
+ 			got, err := NormalizeURL(tt.in)
+ 			if tt.wantErr {
+ 				var ve *ValidationError

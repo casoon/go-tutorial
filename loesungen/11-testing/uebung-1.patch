@@ -1,0 +1,13 @@
+diff --git a/internal/monitor/monitor_test.go b/internal/monitor/monitor_test.go
+index 9485d51..03fe8d8 100644
+--- a/internal/monitor/monitor_test.go
++++ b/internal/monitor/monitor_test.go
+@@ -17,6 +17,8 @@ func TestNormalizeURL(t *testing.T) {
+ 		{name: "https", in: "https://example.com", want: "https://example.com"},
+ 		{name: "trims space", in: "  http://example.com/a  ", want: "http://example.com/a"},
+ 		{name: "drops fragment", in: "https://example.com/#top", want: "https://example.com/"},
++		{name: "keeps port", in: "https://example.com:8443/status", want: "https://example.com:8443/status"},
++		{name: "keeps query", in: "https://example.com/health?full=1&lang=de", want: "https://example.com/health?full=1&lang=de"},
+ 		{name: "empty", in: "", wantErr: true},
+ 		{name: "no scheme", in: "example.com", wantErr: true},
+ 		{name: "ftp", in: "ftp://example.com", wantErr: true},

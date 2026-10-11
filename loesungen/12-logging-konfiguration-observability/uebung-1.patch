@@ -1,0 +1,139 @@
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 7fbcc99..cb96756 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -196,7 +196,7 @@ func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
+ 	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+ 	defer cancel()
+ 	if err := a.store.Ping(ctx); err != nil {
+-		a.logger.Warn("readiness check failed", "err", err)
++		a.log(r).Warn("readiness check failed", "err", err)
+ 		writeError(w, http.StatusServiceUnavailable, "database unavailable")
+ 		return
+ 	}
+@@ -222,7 +222,7 @@ func (a *API) handleError(w http.ResponseWriter, r *http.Request, err error) {
+ // serverError logs the details and returns a generic message: internal
+ // error texts can leak SQL, file paths or hostnames.
+ func (a *API) serverError(w http.ResponseWriter, r *http.Request, err error) {
+-	a.logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
++	a.log(r).Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+ 	writeError(w, http.StatusInternalServerError, "internal server error")
+ }
+ 
+diff --git a/internal/httpapi/httpapi_test.go b/internal/httpapi/httpapi_test.go
+index 9ba0c28..484265f 100644
+--- a/internal/httpapi/httpapi_test.go
++++ b/internal/httpapi/httpapi_test.go
+@@ -1,6 +1,7 @@
+ package httpapi
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
+@@ -141,3 +142,45 @@ func TestPanicBecomes500(t *testing.T) {
+ 		t.Fatalf("status = %d, want 500", resp.StatusCode)
+ 	}
+ }
++
++func TestRequestID(t *testing.T) {
++	var logs bytes.Buffer
++	logger := slog.New(slog.NewJSONHandler(&logs, nil))
++	// failingStore makes GET /targets fail, so the handler logs too.
++	h := New(failingStore{}, logger)
++
++	rec := httptest.NewRecorder()
++	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/targets", nil))
++
++	id := rec.Header().Get("X-Request-Id")
++	if id == "" {
++		t.Fatal("X-Request-Id header is missing")
++	}
++
++	// Two lines: "request failed" from the handler, "request" from the
++	// middleware. Both must carry the ID from the header.
++	var lines int
++	dec := json.NewDecoder(&logs)
++	for dec.More() {
++		var entry struct {
++			Msg       string `json:"msg"`
++			RequestID string `json:"request_id"`
++		}
++		if err := dec.Decode(&entry); err != nil {
++			t.Fatal(err)
++		}
++		lines++
++		if entry.RequestID != id {
++			t.Errorf("log %q: request_id = %q, want %q", entry.Msg, entry.RequestID, id)
++		}
++	}
++	if lines != 2 {
++		t.Errorf("got %d log lines, want 2", lines)
++	}
++
++	rec2 := httptest.NewRecorder()
++	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/healthz", nil))
++	if id2 := rec2.Header().Get("X-Request-Id"); id2 == "" || id2 == id {
++		t.Errorf("second request ID = %q, want a new one (first was %q)", id2, id)
++	}
++}
+diff --git a/internal/httpapi/middleware.go b/internal/httpapi/middleware.go
+index 64bb20c..1ee0d81 100644
+--- a/internal/httpapi/middleware.go
++++ b/internal/httpapi/middleware.go
+@@ -1,6 +1,9 @@
+ package httpapi
+ 
+ import (
++	"context"
++	"crypto/rand"
++	"log/slog"
+ 	"net/http"
+ 	"time"
+ )
+@@ -22,12 +25,35 @@ func (r *statusRecorder) WriteHeader(code int) {
+ // Unwrap lets http.ResponseController reach the underlying writer.
+ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+ 
++// requestIDKey is the context key for the request ID. An unexported type
++// cannot collide with keys from other packages.
++type requestIDKey struct{}
++
++// requestID returns the ID that logRequests stored in ctx, or "".
++func requestID(ctx context.Context) string {
++	id, _ := ctx.Value(requestIDKey{}).(string)
++	return id
++}
++
++// log returns the API logger with the request ID of r attached. Handlers
++// that log use it, so their lines can be matched with the request line.
++func (a *API) log(r *http.Request) *slog.Logger {
++	return a.logger.With("request_id", requestID(r.Context()))
++}
++
+ func (a *API) logRequests(next http.Handler) http.Handler {
+ 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		start := time.Now()
++		// A random ID per request. It is not a secret, but rand.Text is
++		// the simplest way to get a unique string without coordination.
++		id := rand.Text()
++		w.Header().Set("X-Request-Id", id)
++		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id))
++
+ 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+ 		next.ServeHTTP(rec, r)
+ 		a.logger.Info("request",
++			"request_id", id,
+ 			"method", r.Method,
+ 			"path", r.URL.Path,
+ 			"status", rec.status,
+@@ -46,7 +72,7 @@ func (a *API) recoverPanics(next http.Handler) http.Handler {
+ 				if v == http.ErrAbortHandler {
+ 					panic(v)
+ 				}
+-				a.logger.Error("panic in handler", "path", r.URL.Path, "panic", v)
++				a.log(r).Error("panic in handler", "path", r.URL.Path, "panic", v)
+ 				writeError(w, http.StatusInternalServerError, "internal server error")
+ 			}
+ 		}()

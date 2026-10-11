@@ -1,0 +1,48 @@
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 22b3c52..2dffdba 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -53,3 +53,43 @@ func TestLoadReportsAllErrors(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestLoadRejectsYes(t *testing.T) {
++	_, err := Load(env(map[string]string{"UPWATCH_LOG_JSON": "yes"}))
++	if err == nil {
++		t.Fatal("UPWATCH_LOG_JSON=yes accepted, want an error")
++	}
++	// The message must name the variable, the expected form and the
++	// value that was given, so it can be fixed without reading the code.
++	for _, want := range []string{"UPWATCH_LOG_JSON", "true or false", `"yes"`} {
++		if !strings.Contains(err.Error(), want) {
++			t.Errorf("error %q does not contain %s", err, want)
++		}
++	}
++}
++
++func TestLoadBoolSpellings(t *testing.T) {
++	// strconv.ParseBool decides what counts as a boolean.
++	tests := []struct {
++		in   string
++		want bool
++	}{
++		{"true", true}, {"True", true}, {"TRUE", true}, {"t", true}, {"1", true},
++		{"false", false}, {"F", false}, {"0", false},
++	}
++	for _, tt := range tests {
++		cfg, err := Load(env(map[string]string{"UPWATCH_LOG_JSON": tt.in}))
++		if err != nil {
++			t.Errorf("UPWATCH_LOG_JSON=%q: unexpected error: %v", tt.in, err)
++			continue
++		}
++		if cfg.LogJSON != tt.want {
++			t.Errorf("UPWATCH_LOG_JSON=%q: LogJSON = %v, want %v", tt.in, cfg.LogJSON, tt.want)
++		}
++	}
++	for _, in := range []string{"yes", "no", "on", "off", "tRuE", "2"} {
++		if _, err := Load(env(map[string]string{"UPWATCH_LOG_JSON": in})); err == nil {
++			t.Errorf("UPWATCH_LOG_JSON=%q accepted, want an error", in)
++		}
++	}
++}

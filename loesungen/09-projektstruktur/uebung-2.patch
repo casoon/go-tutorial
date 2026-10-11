@@ -1,0 +1,87 @@
+diff --git a/internal/alert/alert.go b/internal/alert/alert.go
+new file mode 100644
+index 0000000..b10c747
+--- /dev/null
++++ b/internal/alert/alert.go
+@@ -0,0 +1,68 @@
++// Package alert decides when a failing target is worth a notification:
++// after Threshold consecutive failed checks, and at most once per Cooldown
++// for the same target.
++//
++// Sketch for exercise 2 of part 09: types and signatures only.
++package alert
++
++import (
++	"context"
++	"log/slog"
++	"sync"
++	"time"
++
++	"github.com/casoon/go-tutorial/internal/monitor"
++)
++
++// History is what alert needs from persistence. It is defined here, at
++// the consumer; *sqlitestore.Store satisfies it without knowing it.
++type History interface {
++	Target(ctx context.Context, id int64) (monitor.Target, error)
++	Results(ctx context.Context, targetID int64, limit int) ([]monitor.Result, error)
++}
++
++// Sender delivers a notification, for example as a mail.
++type Sender interface {
++	Send(ctx context.Context, n Notification) error
++}
++
++// Notification is what a Sender gets: the target and the failed results
++// that triggered the alert, newest first.
++type Notification struct {
++	Target   monitor.Target
++	Failures []monitor.Result
++}
++
++// Alerter watches results. Create it with New.
++type Alerter struct {
++	history   History
++	sender    Sender
++	logger    *slog.Logger
++	threshold int
++	cooldown  time.Duration
++	now       func() time.Time
++
++	mu       sync.Mutex
++	lastSent map[int64]time.Time // target id -> time of the last alert
++}
++
++// New returns an Alerter that notifies after threshold consecutive
++// failures, at most once per cooldown and target.
++func New(history History, sender Sender, logger *slog.Logger, threshold int, cooldown time.Duration) *Alerter {
++	return &Alerter{
++		history:   history,
++		sender:    sender,
++		logger:    logger,
++		threshold: threshold,
++		cooldown:  cooldown,
++		now:       time.Now,
++		lastSent:  make(map[int64]time.Time),
++	}
++}
++
++// Observe is called once for every stored result. It loads the latest
++// threshold results of the target and sends a notification if all of
++// them failed and the last alert is older than the cooldown.
++func (a *Alerter) Observe(ctx context.Context, r monitor.Result) error {
++	panic("alert: sketch only, not implemented")
++}
+diff --git a/internal/alert/alert_test.go b/internal/alert/alert_test.go
+new file mode 100644
+index 0000000..195f538
+--- /dev/null
++++ b/internal/alert/alert_test.go
+@@ -0,0 +1,7 @@
++package alert
++
++import "github.com/casoon/go-tutorial/internal/sqlitestore"
++
++// The real store satisfies History as it is: no change in sqlitestore,
++// and no import from sqlitestore to alert.
++var _ History = (*sqlitestore.Store)(nil)

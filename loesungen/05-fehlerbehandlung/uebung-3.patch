@@ -1,0 +1,45 @@
+diff --git a/internal/sqlitestore/store.go b/internal/sqlitestore/store.go
+index efc6b68..b356904 100644
+--- a/internal/sqlitestore/store.go
++++ b/internal/sqlitestore/store.go
+@@ -145,7 +145,9 @@ func (s *Store) Target(ctx context.Context, id int64) (monitor.Target, error) {
+ 		`SELECT id, url, interval_seconds, created_at FROM targets WHERE id = ?`, id)
+ 	t, err := scanTarget(row)
+ 	if errors.Is(err, sql.ErrNoRows) {
+-		return monitor.Target{}, fmt.Errorf("target %d: %w", id, monitor.ErrNotFound)
++		// Exercise only: wrapping sql.ErrNoRows as well makes it part of the
++		// store's API. Callers could now test for it, see the chapter text.
++		return monitor.Target{}, fmt.Errorf("target %d: %w (%w)", id, monitor.ErrNotFound, err)
+ 	}
+ 	if err != nil {
+ 		return monitor.Target{}, fmt.Errorf("select target %d: %w", id, err)
+diff --git a/internal/sqlitestore/store_test.go b/internal/sqlitestore/store_test.go
+index 32e745a..9c3d0dc 100644
+--- a/internal/sqlitestore/store_test.go
++++ b/internal/sqlitestore/store_test.go
+@@ -1,6 +1,7 @@
+ package sqlitestore
+ 
+ import (
++	"database/sql"
+ 	"errors"
+ 	"path/filepath"
+ 	"testing"
+@@ -152,3 +153,17 @@ func TestMigrateIsIdempotent(t *testing.T) {
+ 		s.Close()
+ 	}
+ }
++
++// TestTargetLeaksNoRows documents the effect of wrapping two errors: the
++// domain error and the driver error are both reachable for errors.Is.
++func TestTargetLeaksNoRows(t *testing.T) {
++	s := newStore(t)
++	_, err := s.Target(t.Context(), 99)
++	if !errors.Is(err, monitor.ErrNotFound) {
++		t.Errorf("errors.Is(err, monitor.ErrNotFound) = false, want true")
++	}
++	if !errors.Is(err, sql.ErrNoRows) {
++		t.Errorf("errors.Is(err, sql.ErrNoRows) = false, want true")
++	}
++	t.Log(err)
++}

@@ -1,0 +1,109 @@
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 7fbcc99..af1a871 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -49,7 +49,7 @@ func New(store Store, logger *slog.Logger) http.Handler {
+ 
+ 	// Outermost first: logging sees every request, including those that
+ 	// panicked, because recoverPanics turns the panic into a 500 inside it.
+-	return a.logRequests(a.recoverPanics(securityHeaders(mux)))
++	return a.logRequests(a.recoverPanics(securityHeaders(jsonErrors(mux))))
+ }
+ 
+ // Wire format. Keeping it separate from monitor.Target means the database
+diff --git a/internal/httpapi/httpapi_test.go b/internal/httpapi/httpapi_test.go
+index 9ba0c28..2085a26 100644
+--- a/internal/httpapi/httpapi_test.go
++++ b/internal/httpapi/httpapi_test.go
+@@ -141,3 +141,36 @@ func TestPanicBecomes500(t *testing.T) {
+ 		t.Fatalf("status = %d, want 500", resp.StatusCode)
+ 	}
+ }
++
++func TestMuxErrorsAreJSON(t *testing.T) {
++	srv := newServer(t)
++
++	tests := []struct {
++		name, method, path string
++		wantStatus         int
++		wantBody           string
++		wantAllow          string
++	}{
++		{"unknown path", "GET", "/nope", 404, `{"error":"not found"}`, ""},
++		{"wrong method", "PUT", "/targets/1", 405, `{"error":"method not allowed"}`, "DELETE, GET, HEAD"},
++		// Written by getTarget, not by the mux: must stay as it is.
++		{"unknown target", "GET", "/targets/99", 404, `{"error":"target not found"}`, ""},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			resp, body := do(t, tt.method, srv.URL+tt.path, "")
++			if resp.StatusCode != tt.wantStatus {
++				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
++			}
++			if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
++				t.Errorf("Content-Type = %q, want application/json", ct)
++			}
++			if got := strings.TrimSpace(body); got != tt.wantBody {
++				t.Errorf("body = %s, want %s", got, tt.wantBody)
++			}
++			if got := resp.Header.Get("Allow"); got != tt.wantAllow {
++				t.Errorf("Allow = %q, want %q", got, tt.wantAllow)
++			}
++		})
++	}
++}
+diff --git a/internal/httpapi/middleware.go b/internal/httpapi/middleware.go
+index 64bb20c..f149089 100644
+--- a/internal/httpapi/middleware.go
++++ b/internal/httpapi/middleware.go
+@@ -2,6 +2,7 @@ package httpapi
+ 
+ import (
+ 	"net/http"
++	"strings"
+ 	"time"
+ )
+ 
+@@ -62,3 +63,42 @@ func securityHeaders(next http.Handler) http.Handler {
+ 		next.ServeHTTP(w, r)
+ 	})
+ }
++
++// jsonErrors replaces the plain-text 404 and 405 answers of the mux with
++// the API's JSON error format. It sits directly around the mux, so it only
++// ever sees responses written by the mux or by our own handlers.
++func jsonErrors(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		next.ServeHTTP(&errorRewriter{ResponseWriter: w}, r)
++	})
++}
++
++// errorRewriter intercepts WriteHeader. Our handlers answer 404 with JSON
++// themselves; only the mux sends text/plain (via http.Error), so the
++// Content-Type tells the two apart.
++type errorRewriter struct {
++	http.ResponseWriter
++	replaced bool
++}
++
++func (e *errorRewriter) WriteHeader(code int) {
++	isText := strings.HasPrefix(e.Header().Get("Content-Type"), "text/plain")
++	if isText && (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) {
++		e.replaced = true
++		// The Allow header of a 405 is already set and stays untouched.
++		writeError(e.ResponseWriter, code, strings.ToLower(http.StatusText(code)))
++		return
++	}
++	e.ResponseWriter.WriteHeader(code)
++}
++
++// Write drops the text body of a replaced response.
++func (e *errorRewriter) Write(b []byte) (int, error) {
++	if e.replaced {
++		return len(b), nil
++	}
++	return e.ResponseWriter.Write(b)
++}
++
++// Unwrap lets http.ResponseController reach the underlying writer.
++func (e *errorRewriter) Unwrap() http.ResponseWriter { return e.ResponseWriter }

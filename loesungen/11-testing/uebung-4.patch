@@ -1,0 +1,103 @@
+diff --git a/internal/scheduler/scheduler_test.go b/internal/scheduler/scheduler_test.go
+index 916a677..a8d2d01 100644
+--- a/internal/scheduler/scheduler_test.go
++++ b/internal/scheduler/scheduler_test.go
+@@ -2,6 +2,7 @@ package scheduler
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"io"
+ 	"log/slog"
+ 	"sync"
+@@ -15,9 +16,11 @@ import (
+ // fakeStore hands out every target exactly once and records saved results.
+ // A fake is simpler and more honest than a mock: it has real behavior.
+ type fakeStore struct {
+-	mu      sync.Mutex
+-	pending []monitor.Target
+-	saved   []monitor.Result
++	mu       sync.Mutex
++	pending  []monitor.Target
++	saved    []monitor.Result
++	saveErr  error // if set, SaveResult fails with it
++	attempts int   // SaveResult calls, successful or not
+ }
+ 
+ func (f *fakeStore) ClaimDue(_ context.Context, _ time.Time, limit int) ([]monitor.Target, error) {
+@@ -32,10 +35,26 @@ func (f *fakeStore) ClaimDue(_ context.Context, _ time.Time, limit int) ([]monit
+ func (f *fakeStore) SaveResult(_ context.Context, r monitor.Result) error {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
++	f.attempts++
++	if f.saveErr != nil {
++		return f.saveErr
++	}
+ 	f.saved = append(f.saved, r)
+ 	return nil
+ }
+ 
++func (f *fakeStore) attemptCount() int {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return f.attempts
++}
++
++func (f *fakeStore) add(targets ...monitor.Target) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.pending = append(f.pending, targets...)
++}
++
+ func (f *fakeStore) savedCount() int {
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+@@ -118,3 +137,48 @@ func TestRunStopsOnCancel(t *testing.T) {
+ 		}
+ 	})
+ }
++
++func TestRunContinuesWhenSaveFails(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		store := &fakeStore{saveErr: errors.New("disk full")}
++		for i := range 5 {
++			store.pending = append(store.pending, monitor.Target{ID: int64(i + 1)})
++		}
++		// saveFailures is a process-wide expvar counter. Compare deltas,
++		// it cannot be reset per test.
++		failuresBefore := saveFailures.Value()
++
++		ctx, cancel := context.WithCancel(t.Context())
++		s := New(store, fakeChecker{}, discardLogger(), 3, time.Second)
++		done := make(chan struct{})
++		go func() {
++			s.Run(ctx)
++			close(done)
++		}()
++
++		// 5 checks of 100ms on 3 workers need 2 rounds = 200ms.
++		time.Sleep(200 * time.Millisecond)
++		synctest.Wait()
++		if got := store.attemptCount(); got != 5 {
++			t.Fatalf("after 200ms save attempts = %d, want 5", got)
++		}
++
++		// Failed saves must not stop the scheduler: targets that become
++		// due later are claimed on the next tick (1s) and checked (100ms).
++		store.add(monitor.Target{ID: 6}, monitor.Target{ID: 7})
++		time.Sleep(900 * time.Millisecond)
++		synctest.Wait()
++		if got := store.attemptCount(); got != 7 {
++			t.Fatalf("after 1.1s save attempts = %d, want 7", got)
++		}
++		if got := store.savedCount(); got != 0 {
++			t.Errorf("saved = %d, want 0", got)
++		}
++		if got := saveFailures.Value() - failuresBefore; got != 7 {
++			t.Errorf("upwatch_save_failures_total grew by %d, want 7", got)
++		}
++
++		cancel()
++		<-done
++	})
++}

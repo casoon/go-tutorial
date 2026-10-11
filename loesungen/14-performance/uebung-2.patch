@@ -1,0 +1,83 @@
+diff --git a/internal/sqlitestore/store_bench_test.go b/internal/sqlitestore/store_bench_test.go
+new file mode 100644
+index 0000000..d08a0ca
+--- /dev/null
++++ b/internal/sqlitestore/store_bench_test.go
+@@ -0,0 +1,77 @@
++package sqlitestore
++
++import (
++	"fmt"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/casoon/go-tutorial/internal/monitor"
++)
++
++// BenchmarkResults reads results from a real SQLite database. One target
++// has 1000 results, another only 5, to cover the case where limit is much
++// larger than what the query returns.
++func BenchmarkResults(b *testing.B) {
++	s, err := Open(b.Context(), filepath.Join(b.TempDir(), "bench.db"))
++	if err != nil {
++		b.Fatal(err)
++	}
++	b.Cleanup(func() { s.Close() })
++
++	full := benchTarget(b, s, "https://example.com/full", 1000)
++	sparse := benchTarget(b, s, "https://example.com/sparse", 5)
++
++	for _, bc := range []struct {
++		target monitor.Target
++		rows   int
++		limit  int
++	}{
++		{full, 1000, 1000},
++		{full, 1000, 50},
++		{sparse, 5, 1000},
++	} {
++		b.Run(fmt.Sprintf("rows=%d/limit=%d", bc.rows, bc.limit), func(b *testing.B) {
++			b.ReportAllocs()
++			for b.Loop() {
++				res, err := s.Results(b.Context(), bc.target.ID, bc.limit)
++				if err != nil || len(res) != min(bc.rows, bc.limit) {
++					b.Fatalf("Results = %d rows, %v", len(res), err)
++				}
++			}
++		})
++	}
++}
++
++// benchTarget creates a target with n results, inserted in one
++// transaction so the setup takes milliseconds, not seconds.
++func benchTarget(b *testing.B, s *Store, url string, n int) monitor.Target {
++	b.Helper()
++	target, err := monitor.NewTarget(url, time.Minute)
++	if err != nil {
++		b.Fatal(err)
++	}
++	target, err = s.CreateTarget(b.Context(), target)
++	if err != nil {
++		b.Fatal(err)
++	}
++	tx, err := s.db.BeginTx(b.Context(), nil)
++	if err != nil {
++		b.Fatal(err)
++	}
++	defer tx.Rollback()
++	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
++	for i := range n {
++		_, err := tx.ExecContext(b.Context(),
++			`INSERT INTO results (target_id, status_code, duration_ms, error, checked_at)
++			 VALUES (?, 200, 42, '', ?)`,
++			target.ID, base.Add(time.Duration(i)*time.Minute).UnixMilli())
++		if err != nil {
++			b.Fatal(err)
++		}
++	}
++	if err := tx.Commit(); err != nil {
++		b.Fatal(err)
++	}
++	return target
++}

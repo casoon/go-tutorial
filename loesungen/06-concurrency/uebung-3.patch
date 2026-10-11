@@ -1,0 +1,30 @@
+diff --git a/beispiele/06-concurrency/leak/main.go b/beispiele/06-concurrency/leak/main.go
+index a3af462..6096c51 100644
+--- a/beispiele/06-concurrency/leak/main.go
++++ b/beispiele/06-concurrency/leak/main.go
+@@ -21,12 +21,21 @@ func FirstLeaky(urls []string, fetch FetchFunc) string {
+ 	return <-ch
+ }
+ 
+-// First returns the first answer as well. The buffer has room for every
+-// result, so each goroutine can send and exit even if nobody receives.
++// First returns the first answer as well. Once it has received, it closes
++// done; every other goroutine then takes the done case of its select
++// instead of blocking on the send, and exits.
+ func First(urls []string, fetch FetchFunc) string {
+-	ch := make(chan string, len(urls))
++	ch := make(chan string)
++	done := make(chan struct{})
++	defer close(done)
+ 	for _, u := range urls {
+-		go func() { ch <- fetch(u) }()
++		go func() {
++			res := fetch(u)
++			select {
++			case ch <- res:
++			case <-done:
++			}
++		}()
+ 	}
+ 	return <-ch
+ }

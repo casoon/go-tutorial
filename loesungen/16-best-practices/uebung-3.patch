@@ -1,0 +1,274 @@
+diff --git a/cmd/upwatch/main.go b/cmd/upwatch/main.go
+index 2e4b09c..45db568 100644
+--- a/cmd/upwatch/main.go
++++ b/cmd/upwatch/main.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/casoon/go-tutorial/internal/check"
+ 	"github.com/casoon/go-tutorial/internal/config"
+ 	"github.com/casoon/go-tutorial/internal/httpapi"
++	"github.com/casoon/go-tutorial/internal/retention"
+ 	"github.com/casoon/go-tutorial/internal/scheduler"
+ 	"github.com/casoon/go-tutorial/internal/sqlitestore"
+ )
+@@ -78,6 +79,10 @@ func run() error {
+ 
+ 	var wg sync.WaitGroup
+ 	wg.Go(func() { sched.Run(ctx) })
++	if cfg.Retention > 0 {
++		// Part of wg, so store.Close waits for a running delete.
++		wg.Go(func() { retention.Run(ctx, store, logger, cfg.Retention, time.Hour) })
++	}
+ 
+ 	if cfg.DebugAddr != "" {
+ 		go serveDebug(cfg.DebugAddr, logger)
+diff --git a/internal/config/config.go b/internal/config/config.go
+index da0f121..9056cdc 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -24,6 +24,7 @@ type Config struct {
+ 	LogLevel     slog.Level    // UPWATCH_LOG_LEVEL (debug, info, warn, error)
+ 	LogJSON      bool          // UPWATCH_LOG_JSON
+ 	AllowPrivate bool          // UPWATCH_ALLOW_PRIVATE_TARGETS, for local testing only
++	Retention    time.Duration // UPWATCH_RETENTION, zero keeps results forever
+ }
+ 
+ // Load reads the configuration via getenv, typically os.Getenv.
+@@ -72,6 +73,7 @@ func Load(getenv func(string) string) (Config, error) {
+ 	num("UPWATCH_WORKERS", &cfg.Workers)
+ 	dur("UPWATCH_TICK", &cfg.Tick)
+ 	dur("UPWATCH_CHECK_TIMEOUT", &cfg.CheckTimeout)
++	dur("UPWATCH_RETENTION", &cfg.Retention)
+ 
+ 	if v := getenv("UPWATCH_LOG_LEVEL"); v != "" {
+ 		if err := cfg.LogLevel.UnmarshalText([]byte(v)); err != nil {
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 22b3c52..5b40669 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -29,12 +29,13 @@ func TestLoadOverrides(t *testing.T) {
+ 		"UPWATCH_TICK":      "1s",
+ 		"UPWATCH_LOG_LEVEL": "debug",
+ 		"UPWATCH_LOG_JSON":  "true",
++		"UPWATCH_RETENTION": "720h",
+ 	}))
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	if cfg.Addr != "127.0.0.1:9000" || cfg.Workers != 2 || cfg.Tick != time.Second ||
+-		cfg.LogLevel != slog.LevelDebug || !cfg.LogJSON {
++		cfg.LogLevel != slog.LevelDebug || !cfg.LogJSON || cfg.Retention != 720*time.Hour {
+ 		t.Errorf("overrides not applied: %+v", cfg)
+ 	}
+ }
+diff --git a/internal/retention/retention.go b/internal/retention/retention.go
+new file mode 100644
+index 0000000..546ee76
+--- /dev/null
++++ b/internal/retention/retention.go
+@@ -0,0 +1,41 @@
++// Package retention periodically deletes old check results, so the
++// results table does not grow without bound.
++package retention
++
++import (
++	"context"
++	"log/slog"
++	"time"
++)
++
++// Store is what retention needs from persistence.
++type Store interface {
++	DeleteResultsBefore(ctx context.Context, before time.Time, batch int) (int64, error)
++}
++
++// batchSize bounds how many rows a single DELETE removes, and with it
++// how long SQLite's write lock is held at a time.
++const batchSize = 1000
++
++// Run deletes results older than maxAge right away and then every
++// interval. It blocks until ctx is canceled.
++func Run(ctx context.Context, store Store, logger *slog.Logger, maxAge, interval time.Duration) {
++	ticker := time.NewTicker(interval)
++	defer ticker.Stop()
++
++	for {
++		n, err := store.DeleteResultsBefore(ctx, time.Now().Add(-maxAge), batchSize)
++		switch {
++		case err != nil && ctx.Err() == nil:
++			logger.Error("delete old results", "err", err)
++		case n > 0:
++			logger.Info("deleted old results", "count", n, "max_age", maxAge)
++		}
++
++		select {
++		case <-ticker.C:
++		case <-ctx.Done():
++			return
++		}
++	}
++}
+diff --git a/internal/retention/retention_test.go b/internal/retention/retention_test.go
+new file mode 100644
+index 0000000..82c02c6
+--- /dev/null
++++ b/internal/retention/retention_test.go
+@@ -0,0 +1,62 @@
++package retention
++
++import (
++	"context"
++	"io"
++	"log/slog"
++	"sync"
++	"testing"
++	"testing/synctest"
++	"time"
++)
++
++// fakeStore records the cutoff of every call.
++type fakeStore struct {
++	mu      sync.Mutex
++	cutoffs []time.Time
++}
++
++func (f *fakeStore) DeleteResultsBefore(_ context.Context, before time.Time, batch int) (int64, error) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.cutoffs = append(f.cutoffs, before)
++	return 0, nil
++}
++
++func (f *fakeStore) calls() []time.Time {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return append([]time.Time(nil), f.cutoffs...)
++}
++
++func TestRunDeletesPeriodically(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		store := &fakeStore{}
++		ctx, cancel := context.WithCancel(t.Context())
++		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
++		start := time.Now()
++
++		done := make(chan struct{})
++		go func() {
++			Run(ctx, store, logger, 24*time.Hour, time.Hour)
++			close(done)
++		}()
++
++		// Once at start, then after 1h and 2h.
++		time.Sleep(2*time.Hour + time.Minute)
++		synctest.Wait()
++		calls := store.calls()
++		if len(calls) != 3 {
++			t.Fatalf("calls = %d, want 3", len(calls))
++		}
++		for i, got := range calls {
++			want := start.Add(time.Duration(i)*time.Hour - 24*time.Hour)
++			if !got.Equal(want) {
++				t.Errorf("call %d: cutoff = %s, want %s", i, got, want)
++			}
++		}
++
++		cancel()
++		<-done
++	})
++}
+diff --git a/internal/sqlitestore/migrations/002_results_checked_at.sql b/internal/sqlitestore/migrations/002_results_checked_at.sql
+new file mode 100644
+index 0000000..cfdeab0
+--- /dev/null
++++ b/internal/sqlitestore/migrations/002_results_checked_at.sql
+@@ -0,0 +1,3 @@
++-- Retention deletes by age across all targets. The index on
++-- (target_id, checked_at) cannot serve that range scan.
++CREATE INDEX results_checked_at ON results (checked_at);
+diff --git a/internal/sqlitestore/store.go b/internal/sqlitestore/store.go
+index efc6b68..63c4765 100644
+--- a/internal/sqlitestore/store.go
++++ b/internal/sqlitestore/store.go
+@@ -279,6 +279,32 @@ func (s *Store) Results(ctx context.Context, targetID int64, limit int) ([]monit
+ 	return results, rows.Err()
+ }
+ 
++// DeleteResultsBefore deletes results checked before the given time and
++// returns how many it removed. It deletes at most batch rows per
++// statement; each statement is its own transaction, so the scheduler's
++// writer gets the write lock between batches instead of waiting for one
++// long delete.
++func (s *Store) DeleteResultsBefore(ctx context.Context, before time.Time, batch int) (int64, error) {
++	var total int64
++	for {
++		res, err := s.db.ExecContext(ctx,
++			`DELETE FROM results WHERE id IN (
++			   SELECT id FROM results WHERE checked_at < ? LIMIT ?)`,
++			before.UnixMilli(), batch)
++		if err != nil {
++			return total, fmt.Errorf("delete results: %w", err)
++		}
++		n, err := res.RowsAffected()
++		if err != nil {
++			return total, fmt.Errorf("delete results: %w", err)
++		}
++		total += n
++		if n < int64(batch) {
++			return total, nil
++		}
++	}
++}
++
+ // scanner is satisfied by both *sql.Row and *sql.Rows.
+ type scanner interface {
+ 	Scan(dest ...any) error
+diff --git a/internal/sqlitestore/store_test.go b/internal/sqlitestore/store_test.go
+index 32e745a..2a88726 100644
+--- a/internal/sqlitestore/store_test.go
++++ b/internal/sqlitestore/store_test.go
+@@ -152,3 +152,46 @@ func TestMigrateIsIdempotent(t *testing.T) {
+ 		s.Close()
+ 	}
+ }
++
++func TestDeleteResultsBefore(t *testing.T) {
++	s := newStore(t)
++	ctx := t.Context()
++	target := mustCreate(t, s, "https://example.com", time.Minute)
++
++	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
++	// 25 old results and 3 new ones; batch size 10 needs three rounds.
++	for i := range 28 {
++		checkedAt := cutoff.Add(-time.Duration(i+1) * time.Minute)
++		if i >= 25 {
++			checkedAt = cutoff.Add(time.Duration(i) * time.Minute)
++		}
++		if err := s.SaveResult(ctx, monitor.Result{TargetID: target.ID, StatusCode: 200, CheckedAt: checkedAt}); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	n, err := s.DeleteResultsBefore(ctx, cutoff, 10)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if n != 25 {
++		t.Errorf("deleted %d, want 25", n)
++	}
++	left, err := s.Results(ctx, target.ID, 100)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(left) != 3 {
++		t.Fatalf("left %d results, want 3", len(left))
++	}
++	for _, r := range left {
++		if r.CheckedAt.Before(cutoff) {
++			t.Errorf("result from %s survived", r.CheckedAt)
++		}
++	}
++
++	// Nothing left to delete: a second run is a no-op.
++	if n, err := s.DeleteResultsBefore(ctx, cutoff, 10); err != nil || n != 0 {
++		t.Errorf("second run = %d, %v; want 0, nil", n, err)
++	}
++}

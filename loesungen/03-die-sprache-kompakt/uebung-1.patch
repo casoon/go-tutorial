@@ -1,0 +1,52 @@
+diff --git a/internal/monitor/uptime.go b/internal/monitor/uptime.go
+new file mode 100644
+index 0000000..515ebc5
+--- /dev/null
++++ b/internal/monitor/uptime.go
+@@ -0,0 +1,17 @@
++package monitor
++
++// Uptime returns the share of successful checks, between 0 and 1.
++// An empty slice yields 0: without checks there is no evidence that the
++// target is up, and a NaN from 0/0 would leak into JSON and comparisons.
++func Uptime(results []Result) float64 {
++	if len(results) == 0 {
++		return 0
++	}
++	up := 0
++	for _, r := range results {
++		if r.Up() {
++			up++
++		}
++	}
++	return float64(up) / float64(len(results))
++}
+diff --git a/internal/monitor/uptime_test.go b/internal/monitor/uptime_test.go
+new file mode 100644
+index 0000000..9c021ce
+--- /dev/null
++++ b/internal/monitor/uptime_test.go
+@@ -0,0 +1,23 @@
++package monitor
++
++import "testing"
++
++func TestUptime(t *testing.T) {
++	tests := []struct {
++		name    string
++		results []Result
++		want    float64
++	}{
++		{"nil", nil, 0},
++		{"all up", []Result{{StatusCode: 200}, {StatusCode: 301}}, 1},
++		{"all down", []Result{{StatusCode: 503}, {Err: "timeout"}}, 0},
++		{"mixed", []Result{{StatusCode: 200}, {StatusCode: 200}, {StatusCode: 200}, {StatusCode: 500}}, 0.75},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := Uptime(tt.results); got != tt.want {
++				t.Errorf("Uptime = %v, want %v", got, tt.want)
++			}
++		})
++	}
++}

@@ -1,0 +1,23 @@
+# test-tags: uebung
+diff --git a/beispiele/04-go-denkweise/interfaces/main.go b/beispiele/04-go-denkweise/interfaces/main.go
+index bf3bc36..0f5acff 100644
+--- a/beispiele/04-go-denkweise/interfaces/main.go
++++ b/beispiele/04-go-denkweise/interfaces/main.go
+@@ -126,6 +126,17 @@ func WithRetry(next Checker, n int) Checker {
+ 	})
+ }
+ 
++// WithFallback asks primary first. Only if primary is unreachable (0) or
++// reports a server error (5xx) does it ask fallback and return its answer.
++func WithFallback(primary, fallback Checker) Checker {
++	return CheckFunc(func(url string) int {
++		if status := primary.Check(url); status != 0 && status < 500 {
++			return status
++		}
++		return fallback.Check(url)
++	})
++}
++
+ // fakeCheck answers from a fixed table instead of the network.
+ func fakeCheck(statuses map[string][]int) CheckFunc {
+ 	var mu sync.Mutex

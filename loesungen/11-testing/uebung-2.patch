@@ -1,0 +1,24 @@
+diff --git a/internal/monitor/monitor_test.go b/internal/monitor/monitor_test.go
+index 9485d51..f8d3a35 100644
+--- a/internal/monitor/monitor_test.go
++++ b/internal/monitor/monitor_test.go
+@@ -95,11 +95,19 @@ func FuzzNormalizeURL(f *testing.F) {
+ 	f.Add("https://example.com")
+ 	f.Add("http://[::1]:8080/path?q=1")
+ 	f.Add("javascript:alert(1)")
++	// Grows from 720 to 2120 bytes when percent-encoded. The corpus file
++	// 4b9a2fad74729647 no longer reaches the length check, because the
++	// whitespace check rejects it first.
++	f.Add("https://example.com/" + strings.Repeat("\xa1", 700))
+ 	f.Fuzz(func(t *testing.T, raw string) {
+ 		got, err := NormalizeURL(raw)
+ 		if err != nil {
+ 			return
+ 		}
++		// What we accept is what gets stored, so it must fit the limit.
++		if len(got) > MaxURLLength {
++			t.Fatalf("NormalizeURL(%q) returned %d bytes, limit is %d", raw, len(got), MaxURLLength)
++		}
+ 		// Whatever we accept must survive a second round unchanged.
+ 		again, err := NormalizeURL(got)
+ 		if err != nil {

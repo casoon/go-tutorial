@@ -1,0 +1,106 @@
+diff --git a/internal/sqlitestore/migrations/002_target_name.sql b/internal/sqlitestore/migrations/002_target_name.sql
+new file mode 100644
+index 0000000..0d1bdbc
+--- /dev/null
++++ b/internal/sqlitestore/migrations/002_target_name.sql
+@@ -0,0 +1,2 @@
++-- A display name for targets. Existing rows get the empty string.
++ALTER TABLE targets ADD COLUMN name TEXT NOT NULL DEFAULT '';
+diff --git a/internal/sqlitestore/store.go b/internal/sqlitestore/store.go
+index efc6b68..a2d0a2c 100644
+--- a/internal/sqlitestore/store.go
++++ b/internal/sqlitestore/store.go
+@@ -189,6 +189,28 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
+ 	return nil
+ }
+ 
++// UpdateInterval changes how often a target is checked. The next check
++// stays where it is; the new interval applies from the following claim on.
++// It returns monitor.ErrNotFound if the target does not exist.
++func (s *Store) UpdateInterval(ctx context.Context, id int64, interval time.Duration) error {
++	res, err := s.db.ExecContext(ctx,
++		`UPDATE targets SET interval_seconds = ? WHERE id = ?`,
++		int64(interval/time.Second), id)
++	if err != nil {
++		return fmt.Errorf("update interval of target %d: %w", id, err)
++	}
++	// SQLite counts matched rows, so setting the same interval again
++	// still reports 1. MySQL by default counts changed rows only.
++	n, err := res.RowsAffected()
++	if err != nil {
++		return fmt.Errorf("update interval of target %d: %w", id, err)
++	}
++	if n == 0 {
++		return fmt.Errorf("target %d: %w", id, monitor.ErrNotFound)
++	}
++	return nil
++}
++
+ // ClaimDue returns up to limit targets whose next check is due at now and,
+ // in the same transaction, moves their next check one interval ahead.
+ // Claiming instead of just selecting means a slow check is never started
+diff --git a/internal/sqlitestore/store_test.go b/internal/sqlitestore/store_test.go
+index 32e745a..dcc113e 100644
+--- a/internal/sqlitestore/store_test.go
++++ b/internal/sqlitestore/store_test.go
+@@ -71,6 +71,31 @@ func TestTargetLifecycle(t *testing.T) {
+ 	}
+ }
+ 
++func TestUpdateInterval(t *testing.T) {
++	s := newStore(t)
++	ctx := t.Context()
++	target := mustCreate(t, s, "https://example.com", time.Minute)
++
++	if err := s.UpdateInterval(ctx, target.ID, 5*time.Minute); err != nil {
++		t.Fatalf("UpdateInterval: %v", err)
++	}
++	got, err := s.Target(ctx, target.ID)
++	if err != nil {
++		t.Fatalf("Target: %v", err)
++	}
++	if got.Interval != 5*time.Minute {
++		t.Errorf("Interval = %s, want 5m0s", got.Interval)
++	}
++
++	// Same value again: the row still matches, so this is not ErrNotFound.
++	if err := s.UpdateInterval(ctx, target.ID, 5*time.Minute); err != nil {
++		t.Errorf("UpdateInterval with unchanged value: %v", err)
++	}
++	if err := s.UpdateInterval(ctx, 99, time.Minute); !errors.Is(err, monitor.ErrNotFound) {
++		t.Errorf("UpdateInterval(99) err = %v, want ErrNotFound", err)
++	}
++}
++
+ func TestClaimDue(t *testing.T) {
+ 	s := newStore(t)
+ 	ctx := t.Context()
+@@ -152,3 +177,28 @@ func TestMigrateIsIdempotent(t *testing.T) {
+ 		s.Close()
+ 	}
+ }
++
++func TestMigrationAddsName(t *testing.T) {
++	s := newStore(t)
++	ctx := t.Context()
++	target := mustCreate(t, s, "https://example.com", time.Minute)
++
++	var name string
++	err := s.db.QueryRowContext(ctx,
++		`SELECT name FROM targets WHERE id = ?`, target.ID).Scan(&name)
++	if err != nil {
++		t.Fatalf("select name: %v", err)
++	}
++	if name != "" {
++		t.Errorf("name = %q, want empty default", name)
++	}
++
++	var applied int
++	if err := s.db.QueryRowContext(ctx,
++		`SELECT COUNT(*) FROM schema_migrations`).Scan(&applied); err != nil {
++		t.Fatal(err)
++	}
++	if applied != 2 {
++		t.Errorf("schema_migrations has %d rows, want 2", applied)
++	}
++}

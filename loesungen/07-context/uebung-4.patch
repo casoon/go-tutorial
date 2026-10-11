@@ -1,0 +1,69 @@
+diff --git a/internal/scheduler/scheduler_test.go b/internal/scheduler/scheduler_test.go
+index 916a677..aff7785 100644
+--- a/internal/scheduler/scheduler_test.go
++++ b/internal/scheduler/scheduler_test.go
+@@ -14,10 +14,12 @@ import (
+ 
+ // fakeStore hands out every target exactly once and records saved results.
+ // A fake is simpler and more honest than a mock: it has real behavior.
++// Like a real database, SaveResult gives up when its context ends.
+ type fakeStore struct {
+-	mu      sync.Mutex
+-	pending []monitor.Target
+-	saved   []monitor.Result
++	mu        sync.Mutex
++	pending   []monitor.Target
++	saved     []monitor.Result
++	saveDelay time.Duration // how long an INSERT takes
+ }
+ 
+ func (f *fakeStore) ClaimDue(_ context.Context, _ time.Time, limit int) ([]monitor.Target, error) {
+@@ -29,7 +31,15 @@ func (f *fakeStore) ClaimDue(_ context.Context, _ time.Time, limit int) ([]monit
+ 	return due, nil
+ }
+ 
+-func (f *fakeStore) SaveResult(_ context.Context, r monitor.Result) error {
++func (f *fakeStore) SaveResult(ctx context.Context, r monitor.Result) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	select {
++	case <-time.After(f.saveDelay):
++	case <-ctx.Done():
++		return ctx.Err()
++	}
+ 	f.mu.Lock()
+ 	defer f.mu.Unlock()
+ 	f.saved = append(f.saved, r)
+@@ -118,3 +128,31 @@ func TestRunStopsOnCancel(t *testing.T) {
+ 		}
+ 	})
+ }
++
++// A check finishes at 100ms, its INSERT takes 10ms, and the cancel arrives
++// at 105ms, in the middle of the INSERT. The writer saves with a context
++// that is not canceled together with ctx, so the result still lands.
++func TestRunSavesResultFinishedBeforeCancel(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		store := &fakeStore{
++			pending:   []monitor.Target{{ID: 1}},
++			saveDelay: 10 * time.Millisecond,
++		}
++		ctx, cancel := context.WithCancel(t.Context())
++		s := New(store, fakeChecker{}, discardLogger(), 1, time.Second)
++
++		done := make(chan struct{})
++		go func() {
++			s.Run(ctx)
++			close(done)
++		}()
++
++		time.Sleep(105 * time.Millisecond)
++		cancel()
++		<-done
++
++		if got := store.savedCount(); got != 1 {
++			t.Fatalf("saved = %d, want 1", got)
++		}
++	})
++}

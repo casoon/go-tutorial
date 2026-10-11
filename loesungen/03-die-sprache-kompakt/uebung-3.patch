@@ -1,0 +1,49 @@
+diff --git a/internal/config/config.go b/internal/config/config.go
+index da0f121..9f50bfc 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -33,7 +33,6 @@ func Load(getenv func(string) string) (Config, error) {
+ 	cfg := Config{
+ 		Addr:         ":8080",
+ 		DBPath:       "upwatch.db",
+-		Workers:      8,
+ 		Tick:         5 * time.Second,
+ 		CheckTimeout: 10 * time.Second,
+ 		LogLevel:     slog.LevelInfo,
+@@ -45,15 +44,19 @@ func Load(getenv func(string) string) (Config, error) {
+ 			*dst = v
+ 		}
+ 	}
+-	num := func(key string, dst *int) {
+-		if v := getenv(key); v != "" {
+-			n, err := strconv.Atoi(v)
+-			if err != nil || n < 1 {
+-				errs = append(errs, fmt.Errorf("%s: want a positive integer, got %q", key, v))
+-				return
+-			}
+-			*dst = n
++	// num returns the value instead of writing through a pointer. The
++	// default is a parameter, so an unset or invalid variable yields def.
++	num := func(key string, def int) int {
++		v := getenv(key)
++		if v == "" {
++			return def
++		}
++		n, err := strconv.Atoi(v)
++		if err != nil || n < 1 {
++			errs = append(errs, fmt.Errorf("%s: want a positive integer, got %q", key, v))
++			return def
+ 		}
++		return n
+ 	}
+ 	dur := func(key string, dst *time.Duration) {
+ 		if v := getenv(key); v != "" {
+@@ -69,7 +72,7 @@ func Load(getenv func(string) string) (Config, error) {
+ 	str("UPWATCH_ADDR", &cfg.Addr)
+ 	str("UPWATCH_DEBUG_ADDR", &cfg.DebugAddr)
+ 	str("UPWATCH_DB", &cfg.DBPath)
+-	num("UPWATCH_WORKERS", &cfg.Workers)
++	cfg.Workers = num("UPWATCH_WORKERS", 8)
+ 	dur("UPWATCH_TICK", &cfg.Tick)
+ 	dur("UPWATCH_CHECK_TIMEOUT", &cfg.CheckTimeout)
+ 

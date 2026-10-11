@@ -1,0 +1,16 @@
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 7fbcc99..dc6051f 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -206,9 +206,9 @@ func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
+ // handleError maps domain errors to HTTP status codes. This is the only
+ // place where the API needs to know which errors exist.
+ func (a *API) handleError(w http.ResponseWriter, r *http.Request, err error) {
+-	var ve *monitor.ValidationError
++	ve, isValidation := errors.AsType[*monitor.ValidationError](err)
+ 	switch {
+-	case errors.As(err, &ve):
++	case isValidation:
+ 		writeError(w, http.StatusBadRequest, ve.Error())
+ 	case errors.Is(err, monitor.ErrNotFound):
+ 		writeError(w, http.StatusNotFound, "target not found")

@@ -1,0 +1,83 @@
+diff --git a/cmd/upwatch/main.go b/cmd/upwatch/main.go
+index 2e4b09c..f36690f 100644
+--- a/cmd/upwatch/main.go
++++ b/cmd/upwatch/main.go
+@@ -14,6 +14,7 @@ import (
+ 	"net/http/pprof"
+ 	"os"
+ 	"os/signal"
++	"runtime/debug"
+ 	"sync"
+ 	"syscall"
+ 	"time"
+@@ -45,7 +46,8 @@ func run() error {
+ 
+ 	logger := newLogger(cfg)
+ 	slog.SetDefault(logger)
+-	logger.Info("starting", "version", version, "addr", cfg.Addr, "db", cfg.DBPath)
++	logger.Info("starting", "version", version, "revision", revision(),
++		"addr", cfg.Addr, "db", cfg.DBPath)
+ 
+ 	// ctx is canceled on Ctrl+C or SIGTERM (sent by systemd, Docker, k8s).
+ 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+@@ -137,6 +139,27 @@ func serveDebug(addr string, logger *slog.Logger) {
+ 	}
+ }
+ 
++// revision returns the commit the binary was built from. The go command
++// records it only for go build/install inside a VCS checkout with the vcs
++// tool available; go run, go test and -buildvcs=false leave it out.
++func revision() string {
++	info, ok := debug.ReadBuildInfo()
++	if !ok {
++		return ""
++	}
++	return buildSetting(info, "vcs.revision")
++}
++
++// buildSetting returns the value of key in info.Settings, or "".
++func buildSetting(info *debug.BuildInfo, key string) string {
++	for _, s := range info.Settings {
++		if s.Key == key {
++			return s.Value
++		}
++	}
++	return ""
++}
++
+ func newLogger(cfg config.Config) *slog.Logger {
+ 	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
+ 	if cfg.LogJSON {
+diff --git a/cmd/upwatch/main_test.go b/cmd/upwatch/main_test.go
+new file mode 100644
+index 0000000..95d3502
+--- /dev/null
++++ b/cmd/upwatch/main_test.go
+@@ -0,0 +1,27 @@
++package main
++
++import (
++	"runtime/debug"
++	"testing"
++)
++
++func TestBuildSetting(t *testing.T) {
++	info := &debug.BuildInfo{Settings: []debug.BuildSetting{
++		{Key: "vcs", Value: "git"},
++		{Key: "vcs.revision", Value: "836e744d21d2238556f4763e78137b11b90ded39"},
++	}}
++	if got := buildSetting(info, "vcs.revision"); got != "836e744d21d2238556f4763e78137b11b90ded39" {
++		t.Errorf("vcs.revision = %q", got)
++	}
++	if got := buildSetting(info, "vcs.time"); got != "" {
++		t.Errorf("missing key = %q, want empty", got)
++	}
++}
++
++// Test binaries are built without VCS information, so revision is empty
++// here. This is one of the cases the log line has to cope with.
++func TestRevisionEmptyInTests(t *testing.T) {
++	if got := revision(); got != "" {
++		t.Errorf("revision() = %q in a test binary, want empty", got)
++	}
++}

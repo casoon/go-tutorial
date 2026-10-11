@@ -1,0 +1,55 @@
+diff --git a/beispiele/08-http-api/inmemory/main.go b/beispiele/08-http-api/inmemory/main.go
+index 487c761..dc283e4 100644
+--- a/beispiele/08-http-api/inmemory/main.go
++++ b/beispiele/08-http-api/inmemory/main.go
+@@ -160,7 +160,19 @@ func NewHandler(store *Store) http.Handler {
+ 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+ 	})
+ 
+-	return mux
++	// Wrapping the whole mux: the header also reaches the 404 and 405
++	// responses the mux writes itself.
++	return exampleHeader(mux)
++}
++
++// exampleHeader sets X-Upwatch-Example on every response. Headers must be
++// set before the wrapped handler writes the status, so this happens on
++// the way in.
++func exampleHeader(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("X-Upwatch-Example", "1")
++		next.ServeHTTP(w, r)
++	})
+ }
+ 
+ func writeJSON(w http.ResponseWriter, status int, v any) {
+diff --git a/beispiele/08-http-api/inmemory/main_test.go b/beispiele/08-http-api/inmemory/main_test.go
+index 902a90d..dbbcc59 100644
+--- a/beispiele/08-http-api/inmemory/main_test.go
++++ b/beispiele/08-http-api/inmemory/main_test.go
+@@ -58,3 +58,25 @@ func TestLocationHeader(t *testing.T) {
+ 		t.Errorf("Location = %q, want /targets/1", got)
+ 	}
+ }
++
++func TestExampleHeader(t *testing.T) {
++	h := NewHandler(NewStore())
++	for _, tt := range []struct {
++		method, path string
++		wantStatus   int
++	}{
++		{"GET", "/healthz", 200},
++		{"GET", "/nope", 404},       // written by the mux
++		{"PUT", "/targets/1", 405},  // written by the mux
++		{"GET", "/targets/99", 404}, // written by our handler
++	} {
++		rec := httptest.NewRecorder()
++		h.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
++		if rec.Code != tt.wantStatus {
++			t.Errorf("%s %s: status %d, want %d", tt.method, tt.path, rec.Code, tt.wantStatus)
++		}
++		if got := rec.Header().Get("X-Upwatch-Example"); got != "1" {
++			t.Errorf("%s %s: X-Upwatch-Example = %q, want 1", tt.method, tt.path, got)
++		}
++	}
++}

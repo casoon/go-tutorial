@@ -1,0 +1,190 @@
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 2911b92..3f45a87 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -19,6 +19,7 @@ type Store interface {
+ 	CreateTarget(ctx context.Context, t monitor.Target) (monitor.Target, error)
+ 	Target(ctx context.Context, id int64) (monitor.Target, error)
+ 	Targets(ctx context.Context) ([]monitor.Target, error)
++	UpdateInterval(ctx context.Context, id int64, interval time.Duration) (monitor.Target, error)
+ 	DeleteTarget(ctx context.Context, id int64) error
+ 	Results(ctx context.Context, targetID int64, limit int) ([]monitor.Result, error)
+ 	Ping(ctx context.Context) error
+@@ -42,6 +43,7 @@ func New(store Store, logger *slog.Logger) http.Handler {
+ 	mux.HandleFunc("GET /targets", a.listTargets)
+ 	mux.HandleFunc("POST /targets", a.createTarget)
+ 	mux.HandleFunc("GET /targets/{id}", a.getTarget)
++	mux.HandleFunc("PATCH /targets/{id}", a.updateTarget)
+ 	mux.HandleFunc("DELETE /targets/{id}", a.deleteTarget)
+ 	mux.HandleFunc("GET /targets/{id}/results", a.listResults)
+ 	mux.HandleFunc("GET /healthz", a.healthz)
+@@ -85,6 +87,13 @@ type createTargetRequest struct {
+ 	IntervalSeconds int64  `json:"interval_seconds"`
+ }
+ 
++// updateTargetRequest lists the only field a client may change. The URL is
++// the identity of a target; a different URL is a different target.
++// A pointer tells "missing" apart from 0.
++type updateTargetRequest struct {
++	IntervalSeconds *int64 `json:"interval_seconds"`
++}
++
+ func (a *API) listTargets(w http.ResponseWriter, r *http.Request) {
+ 	targets, err := a.store.Targets(r.Context())
+ 	if err != nil {
+@@ -138,6 +147,38 @@ func (a *API) getTarget(w http.ResponseWriter, r *http.Request) {
+ 	writeJSON(w, http.StatusOK, toTargetJSON(t))
+ }
+ 
++func (a *API) updateTarget(w http.ResponseWriter, r *http.Request) {
++	id, ok := pathID(w, r)
++	if !ok {
++		return
++	}
++	var req updateTargetRequest
++	if err := readJSON(w, r, &req); err != nil {
++		writeError(w, http.StatusBadRequest, err.Error())
++		return
++	}
++	if req.IntervalSeconds == nil {
++		writeError(w, http.StatusBadRequest, "interval_seconds is required")
++		return
++	}
++
++	interval, err := secondsToDuration(*req.IntervalSeconds)
++	if err != nil {
++		a.handleError(w, r, err)
++		return
++	}
++	if err := monitor.ValidateInterval(interval); err != nil {
++		a.handleError(w, r, err)
++		return
++	}
++	t, err := a.store.UpdateInterval(r.Context(), id, interval)
++	if err != nil {
++		a.handleError(w, r, err)
++		return
++	}
++	writeJSON(w, http.StatusOK, toTargetJSON(t))
++}
++
+ func (a *API) deleteTarget(w http.ResponseWriter, r *http.Request) {
+ 	id, ok := pathID(w, r)
+ 	if !ok {
+diff --git a/internal/httpapi/httpapi_test.go b/internal/httpapi/httpapi_test.go
+index a317fdd..b420846 100644
+--- a/internal/httpapi/httpapi_test.go
++++ b/internal/httpapi/httpapi_test.go
+@@ -90,6 +90,13 @@ func TestTargetsAPI(t *testing.T) {
+ 		{"results bad limit", "GET", "/targets/1/results?limit=0", "", 400, "limit"},
+ 		{"results unknown", "GET", "/targets/99/results", "", 404, "not found"},
+ 		{"wrong method", "PUT", "/targets/1", "", 405, ""},
++		{"patch interval", "PATCH", "/targets/1", `{"interval_seconds":120}`, 200, `"interval_seconds":120`},
++		{"patch persisted", "GET", "/targets/1", "", 200, `"interval_seconds":120`},
++		{"patch url", "PATCH", "/targets/1", `{"url":"https://example.org"}`, 400, `unknown field \"url\"`},
++		{"patch missing interval", "PATCH", "/targets/1", `{}`, 400, "required"},
++		{"patch too short", "PATCH", "/targets/1", `{"interval_seconds":5}`, 400, "must be between"},
++		{"patch overflow", "PATCH", "/targets/1", `{"interval_seconds":18446744084}`, 400, "must be between"},
++		{"patch unknown", "PATCH", "/targets/99", `{"interval_seconds":120}`, 404, "not found"},
+ 		{"healthz", "GET", "/healthz", "", 200, "ok"},
+ 		{"readyz", "GET", "/readyz", "", 200, "ready"},
+ 		{"delete", "DELETE", "/targets/1", "", 204, ""},
+diff --git a/internal/monitor/monitor.go b/internal/monitor/monitor.go
+index 7b269b5..727fa63 100644
+--- a/internal/monitor/monitor.go
++++ b/internal/monitor/monitor.go
+@@ -68,13 +68,22 @@ func NewTarget(rawURL string, interval time.Duration) (Target, error) {
+ 	if interval == 0 {
+ 		interval = DefaultInterval
+ 	}
+-	if interval < MinInterval || interval > MaxInterval {
+-		return Target{}, &ValidationError{
++	if err := ValidateInterval(interval); err != nil {
++		return Target{}, err
++	}
++	return Target{URL: u, Interval: interval}, nil
++}
++
++// ValidateInterval reports whether d lies between MinInterval and
++// MaxInterval. Unlike NewTarget it has no default for zero.
++func ValidateInterval(d time.Duration) error {
++	if d < MinInterval || d > MaxInterval {
++		return &ValidationError{
+ 			Field:  "interval",
+ 			Reason: fmt.Sprintf("must be between %s and %s", MinInterval, MaxInterval),
+ 		}
+ 	}
+-	return Target{URL: u, Interval: interval}, nil
++	return nil
+ }
+ 
+ // MaxURLLength bounds the normalized URL, which is what gets stored.
+diff --git a/internal/sqlitestore/store.go b/internal/sqlitestore/store.go
+index efc6b68..72109c5 100644
+--- a/internal/sqlitestore/store.go
++++ b/internal/sqlitestore/store.go
+@@ -153,6 +153,26 @@ func (s *Store) Target(ctx context.Context, id int64) (monitor.Target, error) {
+ 	return t, nil
+ }
+ 
++// UpdateInterval sets a new interval for the target with the given id and
++// returns the updated target or monitor.ErrNotFound. If the new interval
++// makes the next check due earlier, it is moved forward: shortening 24h to
++// 10s should not wait for the rest of the old 24h.
++func (s *Store) UpdateInterval(ctx context.Context, id int64, interval time.Duration) (monitor.Target, error) {
++	next := time.Now().Add(interval).UnixMilli()
++	row := s.db.QueryRowContext(ctx,
++		`UPDATE targets SET interval_seconds = ?, next_check_at = MIN(next_check_at, ?)
++		 WHERE id = ? RETURNING id, url, interval_seconds, created_at`,
++		int64(interval/time.Second), next, id)
++	t, err := scanTarget(row)
++	if errors.Is(err, sql.ErrNoRows) {
++		return monitor.Target{}, fmt.Errorf("target %d: %w", id, monitor.ErrNotFound)
++	}
++	if err != nil {
++		return monitor.Target{}, fmt.Errorf("update target %d: %w", id, err)
++	}
++	return t, nil
++}
++
+ // Targets returns all targets ordered by id.
+ func (s *Store) Targets(ctx context.Context) ([]monitor.Target, error) {
+ 	rows, err := s.db.QueryContext(ctx,
+diff --git a/internal/sqlitestore/store_test.go b/internal/sqlitestore/store_test.go
+index 32e745a..9e6d04b 100644
+--- a/internal/sqlitestore/store_test.go
++++ b/internal/sqlitestore/store_test.go
+@@ -152,3 +152,33 @@ func TestMigrateIsIdempotent(t *testing.T) {
+ 		s.Close()
+ 	}
+ }
++
++func TestUpdateInterval(t *testing.T) {
++	s := newStore(t)
++	ctx := t.Context()
++	target := mustCreate(t, s, "https://example.com", 24*time.Hour)
++
++	// The first check is due at once; claiming it moves the next one 24h out.
++	now := time.Now().Add(time.Second)
++	if due, err := s.ClaimDue(ctx, now, 10); err != nil || len(due) != 1 {
++		t.Fatalf("ClaimDue = %v, %v; want 1 target", due, err)
++	}
++
++	got, err := s.UpdateInterval(ctx, target.ID, 10*time.Second)
++	if err != nil {
++		t.Fatalf("UpdateInterval: %v", err)
++	}
++	if got.Interval != 10*time.Second || got.URL != target.URL || !got.CreatedAt.Equal(target.CreatedAt) {
++		t.Errorf("UpdateInterval = %+v, want %+v with a 10s interval", got, target)
++	}
++
++	// The shorter interval applies right away, not after the old 24h.
++	due, err := s.ClaimDue(ctx, now.Add(11*time.Second), 10)
++	if err != nil || len(due) != 1 {
++		t.Fatalf("ClaimDue after update = %v, %v; want 1 target", due, err)
++	}
++
++	if _, err := s.UpdateInterval(ctx, 99, time.Minute); !errors.Is(err, monitor.ErrNotFound) {
++		t.Errorf("UpdateInterval(99) err = %v, want ErrNotFound", err)
++	}
++}

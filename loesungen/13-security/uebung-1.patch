@@ -1,0 +1,322 @@
+diff --git a/cmd/upwatch/main.go b/cmd/upwatch/main.go
+index 2e4b09c..f5e9f7e 100644
+--- a/cmd/upwatch/main.go
++++ b/cmd/upwatch/main.go
+@@ -60,12 +60,15 @@ func run() error {
+ 	if cfg.AllowPrivate {
+ 		logger.Warn("checks may reach private and loopback addresses")
+ 	}
++	if cfg.APIToken == "" {
++		logger.Warn("API has no authentication, set UPWATCH_API_TOKEN")
++	}
+ 	checker := check.New(check.NewClient(cfg.AllowPrivate), cfg.CheckTimeout)
+ 	sched := scheduler.New(store, checker, logger, cfg.Workers, cfg.Tick)
+ 
+ 	srv := &http.Server{
+ 		Addr:    cfg.Addr,
+-		Handler: httpapi.New(store, logger),
++		Handler: httpapi.New(store, logger, string(cfg.APIToken)),
+ 		// Without timeouts a slow or malicious client can hold a
+ 		// connection (and a goroutine) open forever.
+ 		ReadHeaderTimeout: 5 * time.Second,
+diff --git a/internal/config/config.go b/internal/config/config.go
+index da0f121..8033636 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -24,8 +24,31 @@ type Config struct {
+ 	LogLevel     slog.Level    // UPWATCH_LOG_LEVEL (debug, info, warn, error)
+ 	LogJSON      bool          // UPWATCH_LOG_JSON
+ 	AllowPrivate bool          // UPWATCH_ALLOW_PRIVATE_TARGETS, for local testing only
++	APIToken     Secret        // UPWATCH_API_TOKEN, empty disables authentication
+ }
+ 
++// Secret is a string that must not leak. slog calls LogValue, fmt calls
++// String and encoding/json calls MarshalText, so neither a log line nor a
++// "%+v" or a JSON dump of Config shows the value. Use string(s) where the
++// real value is needed.
++type Secret string
++
++const redacted = "[redacted]"
++
++// LogValue implements slog.LogValuer.
++func (Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
++
++// String implements fmt.Stringer.
++func (Secret) String() string { return redacted }
++
++// MarshalText implements encoding.TextMarshaler. slog's JSON handler
++// encodes a nested struct such as Config with encoding/json, which
++// ignores LogValue on its fields.
++func (Secret) MarshalText() ([]byte, error) { return []byte(redacted), nil }
++
++// minTokenLength rejects tokens short enough to guess.
++const minTokenLength = 16
++
+ // Load reads the configuration via getenv, typically os.Getenv.
+ // Passing the lookup function in keeps Load free of global state and
+ // trivially testable.
+@@ -91,6 +114,15 @@ func Load(getenv func(string) string) (Config, error) {
+ 	boolean("UPWATCH_LOG_JSON", &cfg.LogJSON)
+ 	boolean("UPWATCH_ALLOW_PRIVATE_TARGETS", &cfg.AllowPrivate)
+ 
++	if v := getenv("UPWATCH_API_TOKEN"); v != "" {
++		// Unlike the other messages, this one must not echo the value.
++		if len(v) < minTokenLength {
++			errs = append(errs, fmt.Errorf("UPWATCH_API_TOKEN: want at least %d characters, got %d", minTokenLength, len(v)))
++		} else {
++			cfg.APIToken = Secret(v)
++		}
++	}
++
+ 	// Report every problem at once instead of one per restart.
+ 	return cfg, errors.Join(errs...)
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 22b3c52..fe00ca9 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,6 +1,8 @@
+ package config
+ 
+ import (
++	"bytes"
++	"fmt"
+ 	"log/slog"
+ 	"strings"
+ 	"testing"
+@@ -53,3 +55,36 @@ func TestLoadReportsAllErrors(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestAPIToken(t *testing.T) {
++	const token = "s3cr3t-token-0123456789"
++	cfg, err := Load(env(map[string]string{"UPWATCH_API_TOKEN": token}))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(cfg.APIToken) != token {
++		t.Fatalf("APIToken = %q, want the configured value", string(cfg.APIToken))
++	}
++
++	// The token must not appear in logs or in fmt output of the config.
++	var buf bytes.Buffer
++	logger := slog.New(slog.NewJSONHandler(&buf, nil))
++	logger.Info("config", "token", cfg.APIToken, "cfg", cfg)
++	fmt.Fprintf(&buf, "%v %+v %s", cfg.APIToken, cfg, cfg.APIToken)
++	if strings.Contains(buf.String(), token) {
++		t.Errorf("token leaked: %s", buf.String())
++	}
++	if !strings.Contains(buf.String(), "[redacted]") {
++		t.Errorf("want [redacted] in output, got %s", buf.String())
++	}
++}
++
++func TestAPITokenTooShort(t *testing.T) {
++	_, err := Load(env(map[string]string{"UPWATCH_API_TOKEN": "hunter2"}))
++	if err == nil {
++		t.Fatal("expected an error for a short token")
++	}
++	if strings.Contains(err.Error(), "hunter2") {
++		t.Errorf("error leaks the token: %v", err)
++	}
++}
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 7fbcc99..b3eeb85 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -35,17 +35,29 @@ type API struct {
+ }
+ 
+ // New returns the complete HTTP handler including middleware.
+-func New(store Store, logger *slog.Logger) http.Handler {
++// A non-empty token protects every route except /healthz and /readyz;
++// an empty token disables authentication.
++func New(store Store, logger *slog.Logger, token string) http.Handler {
+ 	a := &API{store: store, logger: logger}
+ 
++	api := http.NewServeMux()
++	api.HandleFunc("GET /targets", a.listTargets)
++	api.HandleFunc("POST /targets", a.createTarget)
++	api.HandleFunc("GET /targets/{id}", a.getTarget)
++	api.HandleFunc("DELETE /targets/{id}", a.deleteTarget)
++	api.HandleFunc("GET /targets/{id}/results", a.listResults)
++
++	var protected http.Handler = api
++	if token != "" {
++		protected = requireToken(token, api)
++	}
++
++	// Probes come from the platform, which has no token. Everything
++	// else, including unknown paths, goes through the token check.
+ 	mux := http.NewServeMux()
+-	mux.HandleFunc("GET /targets", a.listTargets)
+-	mux.HandleFunc("POST /targets", a.createTarget)
+-	mux.HandleFunc("GET /targets/{id}", a.getTarget)
+-	mux.HandleFunc("DELETE /targets/{id}", a.deleteTarget)
+-	mux.HandleFunc("GET /targets/{id}/results", a.listResults)
+ 	mux.HandleFunc("GET /healthz", a.healthz)
+ 	mux.HandleFunc("GET /readyz", a.readyz)
++	mux.Handle("/", protected)
+ 
+ 	// Outermost first: logging sees every request, including those that
+ 	// panicked, because recoverPanics turns the panic into a 500 inside it.
+diff --git a/internal/httpapi/httpapi_test.go b/internal/httpapi/httpapi_test.go
+index 9ba0c28..020bed3 100644
+--- a/internal/httpapi/httpapi_test.go
++++ b/internal/httpapi/httpapi_test.go
+@@ -19,6 +19,11 @@ import (
+ // newServer runs the real API against a real (temporary) SQLite database.
+ // No mocks: httptest gives us a real HTTP server in-process.
+ func newServer(t *testing.T) *httptest.Server {
++	t.Helper()
++	return newServerWithToken(t, "")
++}
++
++func newServerWithToken(t *testing.T, token string) *httptest.Server {
+ 	t.Helper()
+ 	store, err := sqlitestore.Open(t.Context(), filepath.Join(t.TempDir(), "api.db"))
+ 	if err != nil {
+@@ -27,7 +32,7 @@ func newServer(t *testing.T) *httptest.Server {
+ 	t.Cleanup(func() { store.Close() })
+ 
+ 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+-	srv := httptest.NewServer(New(store, logger))
++	srv := httptest.NewServer(New(store, logger, token))
+ 	t.Cleanup(srv.Close)
+ 	return srv
+ }
+@@ -118,7 +123,7 @@ func (failingStore) Targets(context.Context) ([]monitor.Target, error) {
+ 
+ func TestInternalErrorsAreNotLeaked(t *testing.T) {
+ 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+-	srv := httptest.NewServer(New(failingStore{}, logger))
++	srv := httptest.NewServer(New(failingStore{}, logger, ""))
+ 	defer srv.Close()
+ 
+ 	resp, body := do(t, "GET", srv.URL+"/targets", "")
+@@ -133,7 +138,7 @@ func TestInternalErrorsAreNotLeaked(t *testing.T) {
+ func TestPanicBecomes500(t *testing.T) {
+ 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+ 	// The embedded nil Store panics on any call that is not overridden.
+-	srv := httptest.NewServer(New(failingStore{}, logger))
++	srv := httptest.NewServer(New(failingStore{}, logger, ""))
+ 	defer srv.Close()
+ 
+ 	resp, _ := do(t, "GET", srv.URL+"/targets/1", "")
+@@ -141,3 +146,67 @@ func TestPanicBecomes500(t *testing.T) {
+ 		t.Fatalf("status = %d, want 500", resp.StatusCode)
+ 	}
+ }
++
++func TestRequireToken(t *testing.T) {
++	const token = "s3cr3t-token-0123456789"
++	srv := newServerWithToken(t, token)
++
++	tests := []struct {
++		name       string
++		method     string
++		path       string
++		auth       string
++		wantStatus int
++	}{
++		{"no header", "GET", "/targets", "", 401},
++		{"wrong token", "GET", "/targets", "Bearer wrong-token-0123456789", 401},
++		{"prefix of token", "GET", "/targets", "Bearer s3cr3t", 401},
++		{"token plus suffix", "GET", "/targets", "Bearer " + token + "x", 401},
++		{"empty bearer", "GET", "/targets", "Bearer ", 401},
++		{"wrong scheme", "GET", "/targets", "Basic " + token, 401},
++		{"token without scheme", "GET", "/targets", token, 401},
++		{"write without token", "POST", "/targets", "", 401},
++		{"delete without token", "DELETE", "/targets/1", "", 401},
++		{"unknown path without token", "GET", "/admin", "", 401},
++		{"valid token", "GET", "/targets", "Bearer " + token, 200},
++		{"scheme is case-insensitive", "GET", "/targets", "bearer " + token, 200},
++		{"healthz without token", "GET", "/healthz", "", 200},
++		{"readyz without token", "GET", "/readyz", "", 200},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			req, err := http.NewRequestWithContext(t.Context(), tt.method, srv.URL+tt.path, nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if tt.auth != "" {
++				req.Header.Set("Authorization", tt.auth)
++			}
++			resp, err := http.DefaultClient.Do(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			resp.Body.Close()
++			if resp.StatusCode != tt.wantStatus {
++				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
++			}
++			if tt.wantStatus == 401 && resp.Header.Get("WWW-Authenticate") == "" {
++				t.Error("401 without WWW-Authenticate header")
++			}
++		})
++	}
++}
++
++func TestRequireTokenRejectsEverythingWithEmptyToken(t *testing.T) {
++	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
++	h := requireToken("", ok)
++	for _, auth := range []string{"", "Bearer ", "Bearer x"} {
++		req := httptest.NewRequest("GET", "/targets", nil)
++		req.Header.Set("Authorization", auth)
++		rec := httptest.NewRecorder()
++		h.ServeHTTP(rec, req)
++		if rec.Code != http.StatusUnauthorized {
++			t.Errorf("Authorization %q: status = %d, want 401", auth, rec.Code)
++		}
++	}
++}
+diff --git a/internal/httpapi/middleware.go b/internal/httpapi/middleware.go
+index 64bb20c..22be251 100644
+--- a/internal/httpapi/middleware.go
++++ b/internal/httpapi/middleware.go
+@@ -1,7 +1,10 @@
+ package httpapi
+ 
+ import (
++	"crypto/sha256"
++	"crypto/subtle"
+ 	"net/http"
++	"strings"
+ 	"time"
+ )
+ 
+@@ -62,3 +65,32 @@ func securityHeaders(next http.Handler) http.Handler {
+ 		next.ServeHTTP(w, r)
+ 	})
+ }
++
++// requireToken lets a request through only if it carries
++// "Authorization: Bearer <token>" and answers 401 otherwise.
++//
++// The comparison runs in constant time, so response times do not reveal
++// how many leading bytes of a guess were right. Hashing both sides first
++// gives ConstantTimeCompare equal lengths, which also hides the length of
++// the token. An empty token never matches.
++func requireToken(token string, next http.Handler) http.Handler {
++	want := sha256.Sum256([]byte(token))
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
++		if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
++			unauthorized(w)
++			return
++		}
++		have := sha256.Sum256([]byte(got))
++		if subtle.ConstantTimeCompare(have[:], want[:]) != 1 {
++			unauthorized(w)
++			return
++		}
++		next.ServeHTTP(w, r)
++	})
++}
++
++func unauthorized(w http.ResponseWriter) {
++	w.Header().Set("WWW-Authenticate", `Bearer realm="upwatch"`)
++	writeError(w, http.StatusUnauthorized, "missing or invalid token")
++}

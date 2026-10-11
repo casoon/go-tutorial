@@ -1,0 +1,59 @@
+diff --git a/internal/sqlitestore/store_test.go b/internal/sqlitestore/store_test.go
+index 32e745a..5a1c4dc 100644
+--- a/internal/sqlitestore/store_test.go
++++ b/internal/sqlitestore/store_test.go
+@@ -2,7 +2,9 @@ package sqlitestore
+ 
+ import (
+ 	"errors"
++	"fmt"
+ 	"path/filepath"
++	"sync"
+ 	"testing"
+ 	"time"
+ 
+@@ -96,6 +98,44 @@ func TestClaimDue(t *testing.T) {
+ 	}
+ }
+ 
++// TestClaimDueConcurrent lets two goroutines claim the same due target at
++// the same time. Exactly one of them may get it, and neither may fail.
++func TestClaimDueConcurrent(t *testing.T) {
++	s := newStore(t)
++	ctx := t.Context()
++
++	// Several rounds, because a single one may happen to run serially.
++	for round := range 20 {
++		target := mustCreate(t, s, fmt.Sprintf("https://example.com/%d", round), time.Minute)
++		now := time.Now().Add(time.Second)
++
++		start := make(chan struct{})
++		var (
++			wg      sync.WaitGroup
++			claimed [2][]monitor.Target
++			errs    [2]error
++		)
++		for i := range 2 {
++			wg.Go(func() {
++				<-start
++				claimed[i], errs[i] = s.ClaimDue(ctx, now, 10)
++			})
++		}
++		close(start)
++		wg.Wait()
++
++		for i, err := range errs {
++			if err != nil {
++				t.Fatalf("round %d: ClaimDue in goroutine %d: %v", round, i, err)
++			}
++		}
++		if n := len(claimed[0]) + len(claimed[1]); n != 1 {
++			t.Fatalf("round %d: target %d claimed %d times, want exactly once (got %v and %v)",
++				round, target.ID, n, claimed[0], claimed[1])
++		}
++	}
++}
++
+ func TestResults(t *testing.T) {
+ 	s := newStore(t)
+ 	ctx := t.Context()

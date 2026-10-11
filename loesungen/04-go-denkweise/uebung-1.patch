@@ -1,0 +1,56 @@
+diff --git a/beispiele/04-go-denkweise/embedding/main.go b/beispiele/04-go-denkweise/embedding/main.go
+index d701cf2..7b7b761 100644
+--- a/beispiele/04-go-denkweise/embedding/main.go
++++ b/beispiele/04-go-denkweise/embedding/main.go
+@@ -53,18 +53,25 @@ func (m *memStore) Count() int {
+ 	return len(m.saved)
+ }
+ 
+-// countingStore wraps any Store. Embedding the interface promotes every
+-// method; countingStore only replaces Save. Count is forwarded unchanged.
++// countingStore wraps any Store in a named field. Nothing is promoted:
++// every method of Store has to be written out, even the ones that only
++// forward.
+ type countingStore struct {
+-	Store
++	inner Store
+ 	saves int
+ }
+ 
+ func (c *countingStore) Save(url string, status int) error {
+ 	c.saves++
+-	return c.Store.Save(url, status) // explicit call of the wrapped method
++	return c.inner.Save(url, status)
+ }
+ 
++// Count only forwards. With an embedded Store it came for free.
++func (c *countingStore) Count() int { return c.inner.Count() }
++
++// countingStore must stay usable wherever a Store is expected.
++var _ Store = (*countingStore)(nil)
++
+ // Stats needs no constructor: the zero value is an empty, usable
+ // statistic. sync.Mutex and int are both ready to use at zero.
+ type Stats struct {
+@@ -97,7 +104,7 @@ func main() {
+ 	fmt.Println(tc.Name())     // tls: TLSCheck's own method
+ 	fmt.Println(tc.Describe()) // http check of ...: Describe belongs to HTTPCheck
+ 
+-	store := &countingStore{Store: &memStore{}}
++	store := &countingStore{inner: &memStore{}}
+ 	_ = store.Save("https://example.com", 200)
+ 	_ = store.Save("https://example.org", 503)
+ 	fmt.Println("saves:", store.saves, "count:", store.Count())
+diff --git a/beispiele/04-go-denkweise/embedding/main_test.go b/beispiele/04-go-denkweise/embedding/main_test.go
+index 286e133..862bfec 100644
+--- a/beispiele/04-go-denkweise/embedding/main_test.go
++++ b/beispiele/04-go-denkweise/embedding/main_test.go
+@@ -17,7 +17,7 @@ func TestEmbeddingIsNotInheritance(t *testing.T) {
+ 
+ func TestEmbeddedInterfaceForwards(t *testing.T) {
+ 	inner := &memStore{}
+-	store := &countingStore{Store: inner}
++	store := &countingStore{inner: inner}
+ 	if err := store.Save("https://example.com", 200); err != nil {
+ 		t.Fatal(err)
+ 	}

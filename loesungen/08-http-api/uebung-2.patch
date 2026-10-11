@@ -1,0 +1,98 @@
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 7fbcc99..55e2da6 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -7,6 +7,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"log/slog"
++	"mime"
+ 	"net/http"
+ 	"strconv"
+ 	"time"
+@@ -99,6 +100,10 @@ func (a *API) listTargets(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func (a *API) createTarget(w http.ResponseWriter, r *http.Request) {
++	if !isJSON(r) {
++		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
++		return
++	}
+ 	var req createTargetRequest
+ 	if err := readJSON(w, r, &req); err != nil {
+ 		writeError(w, http.StatusBadRequest, err.Error())
+@@ -235,6 +240,13 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+ 	return id, true
+ }
+ 
++// isJSON reports whether the request declares a JSON body. Parameters
++// such as charset are allowed, the media type itself must match.
++func isJSON(r *http.Request) bool {
++	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
++	return err == nil && mediaType == "application/json"
++}
++
+ func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+ 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+ 	dec := json.NewDecoder(r.Body)
+diff --git a/internal/httpapi/httpapi_test.go b/internal/httpapi/httpapi_test.go
+index 9ba0c28..3a8dea4 100644
+--- a/internal/httpapi/httpapi_test.go
++++ b/internal/httpapi/httpapi_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
++	"fmt"
+ 	"io"
+ 	"log/slog"
+ 	"net/http"
+@@ -38,6 +39,9 @@ func do(t *testing.T, method, url, body string) (*http.Response, string) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
++	if body != "" {
++		req.Header.Set("Content-Type", "application/json")
++	}
+ 	resp, err := http.DefaultClient.Do(req)
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -141,3 +145,38 @@ func TestPanicBecomes500(t *testing.T) {
+ 		t.Fatalf("status = %d, want 500", resp.StatusCode)
+ 	}
+ }
++
++func TestCreateTargetRequiresJSON(t *testing.T) {
++	srv := newServer(t)
++
++	tests := []struct {
++		contentType string
++		wantStatus  int
++	}{
++		{"application/x-www-form-urlencoded", http.StatusUnsupportedMediaType}, // curl -d
++		{"text/plain", http.StatusUnsupportedMediaType},
++		{"", http.StatusUnsupportedMediaType},
++		{"application/json; charset=utf-8", http.StatusCreated},
++		{"Application/JSON", http.StatusCreated}, // media types are case-insensitive
++	}
++	for i, tt := range tests {
++		t.Run(tt.contentType, func(t *testing.T) {
++			body := fmt.Sprintf(`{"url":"https://example.com/%d"}`, i)
++			req, err := http.NewRequestWithContext(t.Context(), "POST", srv.URL+"/targets", strings.NewReader(body))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if tt.contentType != "" {
++				req.Header.Set("Content-Type", tt.contentType)
++			}
++			resp, err := http.DefaultClient.Do(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			resp.Body.Close()
++			if resp.StatusCode != tt.wantStatus {
++				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
++			}
++		})
++	}
++}

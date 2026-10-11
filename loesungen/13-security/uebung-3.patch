@@ -1,0 +1,205 @@
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 7fbcc99..b1b3cf7 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -214,6 +214,8 @@ func (a *API) handleError(w http.ResponseWriter, r *http.Request, err error) {
+ 		writeError(w, http.StatusNotFound, "target not found")
+ 	case errors.Is(err, monitor.ErrDuplicate):
+ 		writeError(w, http.StatusConflict, "target already exists")
++	case errors.Is(err, monitor.ErrLimitReached):
++		writeError(w, http.StatusConflict, fmt.Sprintf("at most %d targets allowed", monitor.MaxTargets))
+ 	default:
+ 		a.serverError(w, r, err)
+ 	}
+diff --git a/internal/httpapi/httpapi_test.go b/internal/httpapi/httpapi_test.go
+index 9ba0c28..2ff5f4c 100644
+--- a/internal/httpapi/httpapi_test.go
++++ b/internal/httpapi/httpapi_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
++	"fmt"
+ 	"io"
+ 	"log/slog"
+ 	"net/http"
+@@ -141,3 +142,25 @@ func TestPanicBecomes500(t *testing.T) {
+ 		t.Fatalf("status = %d, want 500", resp.StatusCode)
+ 	}
+ }
++
++// fullStore behaves like a store that already holds monitor.MaxTargets
++// targets.
++type fullStore struct{ Store }
++
++func (fullStore) CreateTarget(context.Context, monitor.Target) (monitor.Target, error) {
++	return monitor.Target{}, fmt.Errorf("500 targets: %w", monitor.ErrLimitReached)
++}
++
++func TestTargetLimitIsConflict(t *testing.T) {
++	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
++	srv := httptest.NewServer(New(fullStore{}, logger))
++	defer srv.Close()
++
++	resp, body := do(t, "POST", srv.URL+"/targets", `{"url":"https://example.com"}`)
++	if resp.StatusCode != http.StatusConflict {
++		t.Fatalf("status = %d, want 409 (body: %s)", resp.StatusCode, body)
++	}
++	if !strings.Contains(body, "at most 500 targets") {
++		t.Errorf("body = %s", body)
++	}
++}
+diff --git a/internal/monitor/monitor.go b/internal/monitor/monitor.go
+index 7b269b5..9c2dfdb 100644
+--- a/internal/monitor/monitor.go
++++ b/internal/monitor/monitor.go
+@@ -14,10 +14,15 @@ import (
+ 
+ // Sentinel errors shared by all storage implementations.
+ var (
+-	ErrNotFound  = errors.New("not found")
+-	ErrDuplicate = errors.New("already exists")
++	ErrNotFound     = errors.New("not found")
++	ErrDuplicate    = errors.New("already exists")
++	ErrLimitReached = errors.New("limit reached")
+ )
+ 
++// MaxTargets caps the number of targets. Every target costs a check per
++// interval; the cap keeps one instance from becoming a request cannon.
++const MaxTargets = 500
++
+ // Interval bounds keep users from hammering a site or never checking it.
+ const (
+ 	MinInterval     = 10 * time.Second
+diff --git a/internal/sqlitestore/store.go b/internal/sqlitestore/store.go
+index efc6b68..07e4af4 100644
+--- a/internal/sqlitestore/store.go
++++ b/internal/sqlitestore/store.go
+@@ -26,7 +26,8 @@ var migrations embed.FS
+ 
+ // Store is safe for concurrent use; *sql.DB manages a connection pool.
+ type Store struct {
+-	db *sql.DB
++	db         *sql.DB
++	maxTargets int // monitor.MaxTargets, lowered in tests
+ }
+ 
+ // Open opens (or creates) the database at path and applies migrations.
+@@ -49,7 +50,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
+ 	db.SetMaxOpenConns(4)
+ 	db.SetConnMaxIdleTime(5 * time.Minute)
+ 
+-	s := &Store{db: db}
++	s := &Store{db: db, maxTargets: monitor.MaxTargets}
+ 	if err := s.migrate(ctx); err != nil {
+ 		db.Close()
+ 		return nil, err
+@@ -117,19 +118,29 @@ func (s *Store) applyMigration(ctx context.Context, name string) error {
+ }
+ 
+ // CreateTarget stores t and returns it with ID and CreatedAt set.
+-// The first check is due immediately.
++// The first check is due immediately. It returns monitor.ErrLimitReached
++// if monitor.MaxTargets targets exist already.
+ func (s *Store) CreateTarget(ctx context.Context, t monitor.Target) (monitor.Target, error) {
+ 	now := time.Now().UTC()
++	// Count and insert in one statement: SQLite runs it atomically, so
++	// concurrent requests cannot both see 499 and end up at 501.
+ 	res, err := s.db.ExecContext(ctx,
+ 		`INSERT INTO targets (url, interval_seconds, created_at, next_check_at)
+-		 VALUES (?, ?, ?, ?)`,
+-		t.URL, int64(t.Interval/time.Second), now.UnixMilli(), now.UnixMilli())
++		 SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM targets) < ?`,
++		t.URL, int64(t.Interval/time.Second), now.UnixMilli(), now.UnixMilli(), s.maxTargets)
+ 	if err != nil {
+ 		if isUniqueViolation(err) {
+ 			return monitor.Target{}, fmt.Errorf("target %s: %w", t.URL, monitor.ErrDuplicate)
+ 		}
+ 		return monitor.Target{}, fmt.Errorf("insert target: %w", err)
+ 	}
++	n, err := res.RowsAffected()
++	if err != nil {
++		return monitor.Target{}, fmt.Errorf("insert target: %w", err)
++	}
++	if n == 0 {
++		return monitor.Target{}, fmt.Errorf("%d targets: %w", s.maxTargets, monitor.ErrLimitReached)
++	}
+ 	id, err := res.LastInsertId()
+ 	if err != nil {
+ 		return monitor.Target{}, fmt.Errorf("insert target: %w", err)
+diff --git a/internal/sqlitestore/store_test.go b/internal/sqlitestore/store_test.go
+index 32e745a..2bc76f6 100644
+--- a/internal/sqlitestore/store_test.go
++++ b/internal/sqlitestore/store_test.go
+@@ -2,7 +2,9 @@ package sqlitestore
+ 
+ import (
+ 	"errors"
++	"fmt"
+ 	"path/filepath"
++	"sync"
+ 	"testing"
+ 	"time"
+ 
+@@ -152,3 +154,61 @@ func TestMigrateIsIdempotent(t *testing.T) {
+ 		s.Close()
+ 	}
+ }
++
++func TestTargetLimit(t *testing.T) {
++	s := newStore(t)
++	s.maxTargets = 3
++
++	for i := range 3 {
++		mustCreate(t, s, fmt.Sprintf("https://example.com/%d", i), time.Minute)
++	}
++	target, _ := monitor.NewTarget("https://example.com/3", time.Minute)
++	if _, err := s.CreateTarget(t.Context(), target); !errors.Is(err, monitor.ErrLimitReached) {
++		t.Fatalf("4th CreateTarget err = %v, want ErrLimitReached", err)
++	}
++
++	// Deleting a target frees a slot.
++	if err := s.DeleteTarget(t.Context(), 1); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := s.CreateTarget(t.Context(), target); err != nil {
++		t.Fatalf("CreateTarget after delete: %v", err)
++	}
++}
++
++// TestTargetLimitConcurrent fires more parallel creates than the limit
++// allows. A check-then-insert in two statements would let several of
++// them through; the single INSERT ... SELECT must not.
++func TestTargetLimitConcurrent(t *testing.T) {
++	s := newStore(t)
++	s.maxTargets = 5
++
++	var (
++		wg      sync.WaitGroup
++		mu      sync.Mutex
++		created int
++	)
++	for i := range 30 {
++		wg.Go(func() {
++			target, _ := monitor.NewTarget(fmt.Sprintf("https://example.com/%d", i), time.Minute)
++			_, err := s.CreateTarget(t.Context(), target)
++			switch {
++			case err == nil:
++				mu.Lock()
++				created++
++				mu.Unlock()
++			case !errors.Is(err, monitor.ErrLimitReached):
++				t.Errorf("CreateTarget: %v", err)
++			}
++		})
++	}
++	wg.Wait()
++
++	all, err := s.Targets(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if created != 5 || len(all) != 5 {
++		t.Errorf("created %d, stored %d, want 5 and 5", created, len(all))
++	}
++}

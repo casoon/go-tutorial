@@ -1,0 +1,80 @@
+diff --git a/internal/check/check.go b/internal/check/check.go
+index db94b82..9bcbf3b 100644
+--- a/internal/check/check.go
++++ b/internal/check/check.go
+@@ -74,11 +74,47 @@ func NewClient(allowPrivate bool) *http.Client {
+ 	}
+ }
+ 
++// forbiddenPrefixes lists special-purpose ranges that netip has no method
++// for (see the IANA special-purpose address registries). None of them is
++// a valid destination for a check on the public internet.
++var forbiddenPrefixes = []netip.Prefix{
++	netip.MustParsePrefix("0.0.0.0/8"),       // "this network"
++	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT
++	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
++	netip.MustParsePrefix("192.0.2.0/24"),    // documentation (TEST-NET-1)
++	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
++	netip.MustParsePrefix("198.51.100.0/24"), // documentation (TEST-NET-2)
++	netip.MustParsePrefix("203.0.113.0/24"),  // documentation (TEST-NET-3)
++	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, includes broadcast
++	netip.MustParsePrefix("::/96"),           // deprecated IPv4-compatible
++	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64
++	netip.MustParsePrefix("2001:db8::/32"),   // documentation
++	netip.MustParsePrefix("2002::/16"),       // 6to4, embeds any IPv4 address
++}
++
++// nat64 is the well-known NAT64 prefix (RFC 6052). An address in it is an
++// IPv4 address in disguise: the gateway forwards 64:ff9b::7f00:1 to
++// 127.0.0.1 on its side.
++var nat64 = netip.MustParsePrefix("64:ff9b::/96")
++
+ func isPublic(ip netip.Addr) bool {
+ 	ip = ip.Unmap()
+-	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() &&
+-		!ip.IsLinkLocalUnicast() &&
+-		!netip.MustParsePrefix("100.64.0.0/10").Contains(ip) // carrier-grade NAT
++	if nat64.Contains(ip) {
++		// Judge the embedded IPv4 address instead of blocking the prefix:
++		// on IPv6-only hosts with DNS64, every public IPv4 site resolves
++		// to an address in this range.
++		b := ip.As16()
++		return isPublic(netip.AddrFrom4([4]byte(b[12:])))
++	}
++	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
++		return false
++	}
++	for _, p := range forbiddenPrefixes {
++		if p.Contains(ip) {
++			return false
++		}
++	}
++	return true
+ }
+ 
+ // Check requests target.URL once. Network errors are recorded in the result,
+diff --git a/internal/check/check_test.go b/internal/check/check_test.go
+index 8c4a96f..9adb1e3 100644
+--- a/internal/check/check_test.go
++++ b/internal/check/check_test.go
+@@ -123,6 +123,20 @@ func TestIsPublic(t *testing.T) {
+ 		{"fe80::1", false},
+ 		{"fd00::1", false},
+ 		{"::ffff:127.0.0.1", false},
++		{"224.0.0.1", false},          // multicast
++		{"198.18.0.1", false},         // benchmarking network
++		{"240.0.0.1", false},          // reserved
++		{"64:ff9b::7f00:1", false},    // NAT64 mapping of 127.0.0.1
++		{"64:ff9b::a9fe:a9fe", false}, // NAT64 mapping of 169.254.169.254
++		{"64:ff9b::a00:1", false},     // NAT64 mapping of 10.0.0.1
++		{"64:ff9b::5db8:d70e", true},  // NAT64 mapping of 93.184.215.14
++		{"64:ff9b:1::a00:1", false},   // local-use NAT64
++		{"::7f00:1", false},           // IPv4-compatible 127.0.0.1
++		{"2002:7f00:1::", false},      // 6to4 around 127.0.0.1
++		{"0.1.2.3", false},
++		{"192.0.2.1", false},
++		{"2001:db8::1", false},
++		{"255.255.255.255", false},
+ 	}
+ 	for _, tt := range tests {
+ 		if got := isPublic(netip.MustParseAddr(tt.ip)); got != tt.want {

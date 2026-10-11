@@ -1,0 +1,78 @@
+diff --git a/internal/scheduler/scheduler.go b/internal/scheduler/scheduler.go
+index cb038f7..e82b231 100644
+--- a/internal/scheduler/scheduler.go
++++ b/internal/scheduler/scheduler.go
+@@ -32,9 +32,10 @@ type Checker interface {
+ 
+ // Metrics are published via expvar at /debug/vars.
+ var (
+-	checksTotal  = expvar.NewInt("upwatch_checks_total")
+-	checksDown   = expvar.NewInt("upwatch_checks_down_total")
+-	saveFailures = expvar.NewInt("upwatch_save_failures_total")
++	checksTotal   = expvar.NewInt("upwatch_checks_total")
++	checksDown    = expvar.NewInt("upwatch_checks_down_total")
++	checksTimeout = expvar.NewInt("upwatch_checks_timeout_total")
++	saveFailures  = expvar.NewInt("upwatch_save_failures_total")
+ )
+ 
+ // Scheduler wires store and checker together. Create it with New.
+@@ -134,6 +135,10 @@ func (s *Scheduler) write(ctx context.Context, results <-chan monitor.Result) {
+ 
+ 	for r := range results {
+ 		checksTotal.Add(1)
++		// check.Checker reports a timed-out check with exactly this text.
++		if r.Err == "timeout" {
++			checksTimeout.Add(1)
++		}
+ 		if !r.Up() {
+ 			checksDown.Add(1)
+ 			s.logger.Warn("target down",
+diff --git a/internal/scheduler/scheduler_test.go b/internal/scheduler/scheduler_test.go
+index 916a677..9649fc5 100644
+--- a/internal/scheduler/scheduler_test.go
++++ b/internal/scheduler/scheduler_test.go
+@@ -118,3 +118,44 @@ func TestRunStopsOnCancel(t *testing.T) {
+ 		}
+ 	})
+ }
++
++// timeoutChecker pretends every check runs into its timeout after 100ms.
++type timeoutChecker struct{}
++
++func (timeoutChecker) Check(ctx context.Context, t monitor.Target) (monitor.Result, error) {
++	select {
++	case <-time.After(100 * time.Millisecond):
++		return monitor.Result{TargetID: t.ID, Err: "timeout"}, nil
++	case <-ctx.Done():
++		return monitor.Result{}, ctx.Err()
++	}
++}
++
++func TestTimeoutsAreCounted(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		store := &fakeStore{pending: []monitor.Target{{ID: 1}, {ID: 2}, {ID: 3}}}
++		// expvar counters are process-wide: compare deltas.
++		timeoutsBefore, downBefore := checksTimeout.Value(), checksDown.Value()
++
++		ctx, cancel := context.WithCancel(t.Context())
++		s := New(store, timeoutChecker{}, discardLogger(), 3, time.Second)
++		done := make(chan struct{})
++		go func() {
++			s.Run(ctx)
++			close(done)
++		}()
++
++		time.Sleep(100 * time.Millisecond)
++		synctest.Wait()
++		cancel()
++		<-done
++
++		if got := checksTimeout.Value() - timeoutsBefore; got != 3 {
++			t.Errorf("upwatch_checks_timeout_total grew by %d, want 3", got)
++		}
++		// A timeout is also a down check.
++		if got := checksDown.Value() - downBefore; got != 3 {
++			t.Errorf("upwatch_checks_down_total grew by %d, want 3", got)
++		}
++	})
++}

@@ -1,0 +1,87 @@
+diff --git a/beispiele/03-die-sprache-kompakt/generics/main.go b/beispiele/03-die-sprache-kompakt/generics/main.go
+index ddf5221..4e6da90 100644
+--- a/beispiele/03-die-sprache-kompakt/generics/main.go
++++ b/beispiele/03-die-sprache-kompakt/generics/main.go
+@@ -7,6 +7,7 @@ package main
+ import (
+ 	"cmp"
+ 	"fmt"
++	"math"
+ 	"slices"
+ 	"time"
+ )
+@@ -59,6 +60,23 @@ func GroupBy[T any, K comparable](values []T, key func(T) K) map[K][]T {
+ 	return groups
+ }
+ 
++// Percentile returns the p-th percentile (0 to 100) by the nearest-rank
++// method: the smallest value that at least p percent of all values do
++// not exceed. It sorts a copy, never values itself: the caller's slice
++// shares its array with us, and sorting it in place would reorder the
++// caller's data behind its back. An empty slice yields the zero value.
++func Percentile[T cmp.Ordered](values []T, p float64) T {
++	if len(values) == 0 {
++		var zero T
++		return zero
++	}
++	sorted := slices.Clone(values)
++	slices.Sort(sorted)
++	rank := int(math.Ceil(p / 100 * float64(len(sorted))))
++	rank = min(max(rank, 1), len(sorted))
++	return sorted[rank-1]
++}
++
+ func main() {
+ 	results := []Result{
+ 		{TargetID: 1, StatusCode: 200, Duration: 120 * time.Millisecond},
+@@ -68,6 +86,7 @@ func main() {
+ 
+ 	durations := Map(results, func(r Result) time.Duration { return r.Duration })
+ 	fmt.Println("average duration:", Average(durations))
++	fmt.Println("p95 duration:    ", Percentile(durations, 95))
+ 	fmt.Println("average status:  ", Average([]int{200, 200, 503}))
+ 
+ 	byTarget := GroupBy(results, func(r Result) int64 { return r.TargetID })
+diff --git a/beispiele/03-die-sprache-kompakt/generics/main_test.go b/beispiele/03-die-sprache-kompakt/generics/main_test.go
+index 5058b03..f20eb13 100644
+--- a/beispiele/03-die-sprache-kompakt/generics/main_test.go
++++ b/beispiele/03-die-sprache-kompakt/generics/main_test.go
+@@ -36,3 +36,38 @@ func TestGroupBy(t *testing.T) {
+ 		t.Errorf("unexpected groups: %v", groups)
+ 	}
+ }
++
++func TestPercentile(t *testing.T) {
++	values := []int{503, 200, 404, 200, 301}
++	tests := []struct {
++		p    float64
++		want int
++	}{
++		{0, 200},
++		{40, 200},
++		{50, 301},
++		{80, 404},
++		{95, 503},
++		{100, 503},
++	}
++	for _, tt := range tests {
++		if got := Percentile(values, tt.p); got != tt.want {
++			t.Errorf("p%v = %d, want %d", tt.p, got, tt.want)
++		}
++	}
++	if got := Percentile[time.Duration](nil, 50); got != 0 {
++		t.Errorf("empty percentile = %v, want 0", got)
++	}
++}
++
++func TestPercentileLeavesInputAlone(t *testing.T) {
++	durations := []time.Duration{3 * time.Second, time.Second, 2 * time.Second}
++	before := slices.Clone(durations)
++
++	if got := Percentile(durations, 50); got != 2*time.Second {
++		t.Errorf("median = %v, want 2s", got)
++	}
++	if !slices.Equal(durations, before) {
++		t.Errorf("input was reordered: %v, want %v", durations, before)
++	}
++}

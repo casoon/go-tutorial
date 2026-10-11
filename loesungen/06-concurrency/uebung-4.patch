@@ -1,0 +1,44 @@
+diff --git a/internal/scheduler/scheduler_test.go b/internal/scheduler/scheduler_test.go
+index 916a677..2f8e934 100644
+--- a/internal/scheduler/scheduler_test.go
++++ b/internal/scheduler/scheduler_test.go
+@@ -118,3 +118,39 @@ func TestRunStopsOnCancel(t *testing.T) {
+ 		}
+ 	})
+ }
++
++// stubbornChecker ignores ctx, like a check built on an API that knows
++// nothing about contexts: it always takes 100ms and always delivers.
++type stubbornChecker struct{}
++
++func (stubbornChecker) Check(_ context.Context, t monitor.Target) (monitor.Result, error) {
++	time.Sleep(100 * time.Millisecond)
++	return monitor.Result{TargetID: t.ID, StatusCode: 200}, nil
++}
++
++// The worker sends its result 50ms after the cancel. Run must not close
++// results before every worker has returned, or this send panics with
++// "send on closed channel".
++func TestRunWaitsForWorkersBeforeClosingResults(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		store := &fakeStore{pending: []monitor.Target{{ID: 1}}}
++		ctx, cancel := context.WithCancel(t.Context())
++		s := New(store, stubbornChecker{}, discardLogger(), 1, time.Second)
++
++		done := make(chan struct{})
++		go func() {
++			s.Run(ctx)
++			close(done)
++		}()
++
++		time.Sleep(50 * time.Millisecond)
++		cancel()
++		<-done
++
++		// The late result is still saved: the writer drains results
++		// with a context that survives the cancel.
++		if got := store.savedCount(); got != 1 {
++			t.Fatalf("saved = %d, want 1", got)
++		}
++	})
++}

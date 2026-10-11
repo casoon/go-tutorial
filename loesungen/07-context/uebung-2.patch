@@ -1,0 +1,76 @@
+diff --git a/internal/check/check.go b/internal/check/check.go
+index db94b82..95b7c11 100644
+--- a/internal/check/check.go
++++ b/internal/check/check.go
+@@ -81,11 +81,16 @@ func isPublic(ip netip.Addr) bool {
+ 		!netip.MustParsePrefix("100.64.0.0/10").Contains(ip) // carrier-grade NAT
+ }
+ 
++// errCheckTimeout is the cause of the checker's own timeout. It tells that
++// timeout apart from a deadline the caller set on ctx.
++var errCheckTimeout = errors.New("check timeout")
++
+ // Check requests target.URL once. Network errors are recorded in the result,
+ // not returned: an unreachable site is a valid outcome of a check.
+-// The returned error is non-nil only if ctx was canceled by the caller.
++// The returned error is non-nil only if the caller's ctx ended first,
++// canceled or past its own deadline.
+ func (c *Checker) Check(ctx context.Context, target monitor.Target) (monitor.Result, error) {
+-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
++	ctx, cancel := context.WithTimeoutCause(ctx, c.timeout, errCheckTimeout)
+ 	defer cancel()
+ 
+ 	res := monitor.Result{TargetID: target.ID, CheckedAt: c.now().UTC()}
+@@ -101,8 +106,9 @@ func (c *Checker) Check(ctx context.Context, target monitor.Target) (monitor.Res
+ 	resp, err := c.client.Do(req)
+ 	res.Duration = time.Since(start)
+ 	if err != nil {
+-		// Distinguish "the caller gave up" from "the site is slow".
+-		if errors.Is(ctx.Err(), context.Canceled) {
++		// Distinguish "the caller gave up" from "the site is slow": only
++		// our own timeout carries errCheckTimeout as its cause.
++		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), errCheckTimeout) {
+ 			return res, fmt.Errorf("check %s: %w", target.URL, ctx.Err())
+ 		}
+ 		res.Err = describe(err)
+@@ -118,7 +124,9 @@ func (c *Checker) Check(ctx context.Context, target monitor.Target) (monitor.Res
+ }
+ 
+ func describe(err error) string {
+-	if errors.Is(err, context.DeadlineExceeded) {
++	// net/http reports the cause of the context, so our own timeout shows
++	// up as errCheckTimeout, not as context.DeadlineExceeded.
++	if errors.Is(err, errCheckTimeout) || errors.Is(err, context.DeadlineExceeded) {
+ 		return "timeout"
+ 	}
+ 	return err.Error()
+diff --git a/internal/check/check_test.go b/internal/check/check_test.go
+index 8c4a96f..8e4928e 100644
+--- a/internal/check/check_test.go
++++ b/internal/check/check_test.go
+@@ -130,3 +130,25 @@ func TestIsPublic(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// The caller's own deadline runs out before the checker's timeout. That is
++// the caller giving up, not a slow site, so Check must return an error
++// instead of a result with "timeout".
++func TestCheckCallerDeadline(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		<-r.Context().Done()
++	}))
++	defer srv.Close()
++
++	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
++	defer cancel()
++
++	c := New(NewClient(true), time.Second)
++	res, err := c.Check(ctx, monitor.Target{URL: srv.URL})
++	if !errors.Is(err, context.DeadlineExceeded) {
++		t.Errorf("err = %v, want context.DeadlineExceeded", err)
++	}
++	if res.Err != "" {
++		t.Errorf("res.Err = %q, want it empty: there is no outcome to record", res.Err)
++	}
++}

@@ -1,0 +1,87 @@
+diff --git a/beispiele/04-go-denkweise/interfaces/main.go b/beispiele/04-go-denkweise/interfaces/main.go
+index bf3bc36..3b74ae5 100644
+--- a/beispiele/04-go-denkweise/interfaces/main.go
++++ b/beispiele/04-go-denkweise/interfaces/main.go
+@@ -6,6 +6,7 @@
+ package main
+ 
+ import (
++	"encoding/csv"
+ 	"fmt"
+ 	"io"
+ 	"os"
+@@ -106,11 +107,35 @@ func WriteReport(w io.Writer, store reportStore) error {
+ 	return nil
+ }
+ 
+-// Compile-time proof that *MemStore satisfies both consumer interfaces.
++// ---- Consumer 3: a CSV export, one line per result.
++
++// csvStore happens to list the same methods as reportStore. It is still
++// its own interface: the export and the report may need different things
++// tomorrow, and neither should have to change because of the other.
++type csvStore interface {
++	Targets() []Target
++	Results(targetID int) []int
++}
++
++func WriteCSV(w io.Writer, store csvStore) error {
++	cw := csv.NewWriter(w)
++	for _, t := range store.Targets() {
++		for _, status := range store.Results(t.ID) {
++			if err := cw.Write([]string{t.URL, strconv.Itoa(status)}); err != nil {
++				return err
++			}
++		}
++	}
++	cw.Flush()
++	return cw.Error()
++}
++
++// Compile-time proof that *MemStore satisfies all consumer interfaces.
+ // MemStore itself never mentions them.
+ var (
+ 	_ runnerStore = (*MemStore)(nil)
+ 	_ reportStore = (*MemStore)(nil)
++	_ csvStore    = (*MemStore)(nil)
+ )
+ 
+ // ---- Middleware: a function that wraps a Checker in another Checker.
+@@ -160,7 +185,10 @@ func run(getenv func(string) string, out io.Writer) error {
+ 	}), retries)
+ 
+ 	NewRunner(store, checker).RunOnce()
+-	return WriteReport(out, store)
++	if err := WriteReport(out, store); err != nil {
++		return err
++	}
++	return WriteCSV(out, store)
+ }
+ 
+ func main() {
+diff --git a/beispiele/04-go-denkweise/interfaces/main_test.go b/beispiele/04-go-denkweise/interfaces/main_test.go
+index c4baab4..61e71e8 100644
+--- a/beispiele/04-go-denkweise/interfaces/main_test.go
++++ b/beispiele/04-go-denkweise/interfaces/main_test.go
+@@ -57,3 +57,21 @@ func TestRun(t *testing.T) {
+ 		t.Error("want error for invalid RETRIES")
+ 	}
+ }
++
++func TestWriteCSV(t *testing.T) {
++	store := NewMemStore("https://a.example", "https://b.example,with-comma")
++	store.SaveResult(1, 200)
++	store.SaveResult(1, 503)
++	store.SaveResult(2, 0)
++
++	var out strings.Builder
++	if err := WriteCSV(&out, store); err != nil {
++		t.Fatal(err)
++	}
++	want := "https://a.example,200\n" +
++		"https://a.example,503\n" +
++		"\"https://b.example,with-comma\",0\n"
++	if out.String() != want {
++		t.Errorf("got\n%s\nwant\n%s", out.String(), want)
++	}
++}

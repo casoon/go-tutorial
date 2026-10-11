@@ -1,0 +1,109 @@
+diff --git a/internal/config/config.go b/internal/config/config.go
+index da0f121..e1f4bf1 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -26,6 +26,18 @@ type Config struct {
+ 	AllowPrivate bool          // UPWATCH_ALLOW_PRIVATE_TARGETS, for local testing only
+ }
+ 
++// FieldError reports an environment variable whose value cannot be used.
++// Callers can collect every FieldError from the joined error of Load.
++type FieldError struct {
++	Key   string // name of the environment variable
++	Value string // the value as found in the environment
++	Want  string // what would have been accepted
++}
++
++func (e *FieldError) Error() string {
++	return fmt.Sprintf("%s: want %s, got %q", e.Key, e.Want, e.Value)
++}
++
+ // Load reads the configuration via getenv, typically os.Getenv.
+ // Passing the lookup function in keeps Load free of global state and
+ // trivially testable.
+@@ -49,7 +61,7 @@ func Load(getenv func(string) string) (Config, error) {
+ 		if v := getenv(key); v != "" {
+ 			n, err := strconv.Atoi(v)
+ 			if err != nil || n < 1 {
+-				errs = append(errs, fmt.Errorf("%s: want a positive integer, got %q", key, v))
++				errs = append(errs, &FieldError{Key: key, Value: v, Want: "a positive integer"})
+ 				return
+ 			}
+ 			*dst = n
+@@ -59,7 +71,7 @@ func Load(getenv func(string) string) (Config, error) {
+ 		if v := getenv(key); v != "" {
+ 			d, err := time.ParseDuration(v)
+ 			if err != nil || d <= 0 {
+-				errs = append(errs, fmt.Errorf("%s: want a positive duration like 5s, got %q", key, v))
++				errs = append(errs, &FieldError{Key: key, Value: v, Want: "a positive duration like 5s"})
+ 				return
+ 			}
+ 			*dst = d
+@@ -82,7 +94,7 @@ func Load(getenv func(string) string) (Config, error) {
+ 		if v := getenv(key); v != "" {
+ 			b, err := strconv.ParseBool(v)
+ 			if err != nil {
+-				errs = append(errs, fmt.Errorf("%s: want true or false, got %q", key, v))
++				errs = append(errs, &FieldError{Key: key, Value: v, Want: "true or false"})
+ 				return
+ 			}
+ 			*dst = b
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 22b3c52..79caba9 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,7 +1,9 @@
+ package config
+ 
+ import (
++	"errors"
+ 	"log/slog"
++	"slices"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -53,3 +55,44 @@ func TestLoadReportsAllErrors(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// fieldErrors returns every *FieldError in err. errors.As stops at the
++// first match, so the joined error is unwrapped first and each part is
++// checked on its own.
++func fieldErrors(err error) []*FieldError {
++	parts := []error{err}
++	if joined, ok := err.(interface{ Unwrap() []error }); ok {
++		parts = joined.Unwrap()
++	}
++	var out []*FieldError
++	for _, part := range parts {
++		var fe *FieldError
++		if errors.As(part, &fe) {
++			out = append(out, fe)
++		}
++	}
++	return out
++}
++
++func TestLoadCollectsFieldErrors(t *testing.T) {
++	_, err := Load(env(map[string]string{
++		"UPWATCH_WORKERS":   "zero",
++		"UPWATCH_TICK":      "-1s",
++		"UPWATCH_LOG_JSON":  "yes please",
++		"UPWATCH_LOG_LEVEL": "loud", // not a FieldError, must be skipped
++	}))
++
++	var keys []string
++	for _, fe := range fieldErrors(err) {
++		keys = append(keys, fe.Key)
++	}
++	want := []string{"UPWATCH_WORKERS", "UPWATCH_TICK", "UPWATCH_LOG_JSON"}
++	if !slices.Equal(keys, want) {
++		t.Errorf("keys = %v, want %v", keys, want)
++	}
++
++	// The message is unchanged, only the type is new.
++	if !strings.Contains(err.Error(), `UPWATCH_WORKERS: want a positive integer, got "zero"`) {
++		t.Errorf("unexpected message: %v", err)
++	}
++}

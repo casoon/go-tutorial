@@ -1,0 +1,106 @@
+diff --git a/beispiele/03-die-sprache-kompakt/grundlagen/main.go b/beispiele/03-die-sprache-kompakt/grundlagen/main.go
+index 6c9180a..084a1c6 100644
+--- a/beispiele/03-die-sprache-kompakt/grundlagen/main.go
++++ b/beispiele/03-die-sprache-kompakt/grundlagen/main.go
+@@ -16,11 +16,17 @@ import (
+ type Status int
+ 
+ const (
+-	StatusUnknown Status = iota // 0, also the zero value
+-	StatusUp                    // 1
+-	StatusDown                  // 2
++	StatusUnknown  Status = iota // 0, also the zero value
++	StatusUp                     // 1
++	StatusDown                   // 2
++	StatusDegraded               // 3: up, but slower than slowThreshold
++
++	numStatuses // not a status: the count, for loops over all of them
+ )
+ 
++// slowThreshold separates up from degraded.
++const slowThreshold = 2 * time.Second
++
+ // String makes Status print nicely with fmt (it satisfies fmt.Stringer).
+ func (s Status) String() string {
+ 	switch s {
+@@ -28,6 +34,8 @@ func (s Status) String() string {
+ 		return "up"
+ 	case StatusDown:
+ 		return "down"
++	case StatusDegraded:
++		return "degraded"
+ 	default:
+ 		return "unknown"
+ 	}
+@@ -66,6 +74,8 @@ func (r Result) Status() Status {
+ 	switch {
+ 	case r.StatusCode == 0:
+ 		return StatusUnknown
++	case r.StatusCode < 400 && r.Duration > slowThreshold:
++		return StatusDegraded
+ 	case r.StatusCode < 400:
+ 		return StatusUp
+ 	default:
+@@ -97,14 +107,14 @@ func main() {
+ 	results := []Result{
+ 		{StatusCode: 200, Duration: 120 * time.Millisecond},
+ 		{StatusCode: 503, Duration: 80 * time.Millisecond},
++		{StatusCode: 200, Duration: 2500 * time.Millisecond},
+ 		{},
+ 	}
+ 	counts := map[Status]int{}
+ 	for _, r := range results {
+ 		counts[r.Status()]++ // missing keys read as 0
+ 	}
+-	for i := range 3 {
+-		s := Status(i)
+-		fmt.Printf("%-7s %d\n", s, counts[s])
++	for s := range numStatuses {
++		fmt.Printf("%-8s %d\n", s, counts[s])
+ 	}
+ }
+diff --git a/beispiele/03-die-sprache-kompakt/grundlagen/main_test.go b/beispiele/03-die-sprache-kompakt/grundlagen/main_test.go
+index c9bf7df..5589317 100644
+--- a/beispiele/03-die-sprache-kompakt/grundlagen/main_test.go
++++ b/beispiele/03-die-sprache-kompakt/grundlagen/main_test.go
+@@ -1,21 +1,30 @@
+ package main
+ 
+-import "testing"
++import (
++	"testing"
++	"time"
++)
+ 
+ func TestResultStatus(t *testing.T) {
+ 	tests := []struct {
+-		code int
+-		want Status
++		code     int
++		duration time.Duration
++		want     Status
+ 	}{
+-		{0, StatusUnknown},
+-		{200, StatusUp},
+-		{301, StatusUp},
+-		{404, StatusDown},
+-		{503, StatusDown},
++		{0, 0, StatusUnknown},
++		{200, 0, StatusUp},
++		{301, 0, StatusUp},
++		{404, 0, StatusDown},
++		{503, 0, StatusDown},
++		{200, 2 * time.Second, StatusUp}, // boundary: not slower than 2s
++		{200, 2500 * time.Millisecond, StatusDegraded},
++		{503, 5 * time.Second, StatusDown}, // slow failures stay down
++		{0, 5 * time.Second, StatusUnknown},
+ 	}
+ 	for _, tt := range tests {
+-		if got := (Result{StatusCode: tt.code}).Status(); got != tt.want {
+-			t.Errorf("status code %d: got %s, want %s", tt.code, got, tt.want)
++		r := Result{StatusCode: tt.code, Duration: tt.duration}
++		if got := r.Status(); got != tt.want {
++			t.Errorf("status code %d after %s: got %s, want %s", tt.code, tt.duration, got, tt.want)
+ 		}
+ 	}
+ }

@@ -1,0 +1,87 @@
+diff --git a/beispiele/07-context/abbruch/main.go b/beispiele/07-context/abbruch/main.go
+new file mode 100644
+index 0000000..5746c5f
+--- /dev/null
++++ b/beispiele/07-context/abbruch/main.go
+@@ -0,0 +1,46 @@
++// Command abbruch ends a context once by its deadline and once by an
++// explicit cancel, and prints the error each one reports.
++package main
++
++import (
++	"context"
++	"fmt"
++	"time"
++)
++
++// wait blocks until ctx ends or a second has passed and returns ctx.Err().
++func wait(ctx context.Context) error {
++	select {
++	case <-ctx.Done():
++	case <-time.After(time.Second):
++	}
++	return ctx.Err()
++}
++
++// withTimeout lets the deadline end the context after 50ms.
++func withTimeout() error {
++	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
++	defer cancel()
++	return wait(ctx)
++}
++
++// withCancel ends the context from another goroutine after 10ms.
++func withCancel() error {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	go func() {
++		time.Sleep(10 * time.Millisecond)
++		cancel()
++	}()
++	return wait(ctx)
++}
++
++func main() {
++	start := time.Now()
++	err := withTimeout()
++	fmt.Printf("WithTimeout: %v after %s\n", err, time.Since(start).Round(time.Millisecond))
++
++	start = time.Now()
++	err = withCancel()
++	fmt.Printf("WithCancel:  %v after %s\n", err, time.Since(start).Round(time.Millisecond))
++}
+diff --git a/beispiele/07-context/abbruch/main_test.go b/beispiele/07-context/abbruch/main_test.go
+new file mode 100644
+index 0000000..cb78b0e
+--- /dev/null
++++ b/beispiele/07-context/abbruch/main_test.go
+@@ -0,0 +1,29 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"testing/synctest"
++	"time"
++)
++
++func TestErrors(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		start := time.Now()
++		if err := withTimeout(); !errors.Is(err, context.DeadlineExceeded) {
++			t.Errorf("withTimeout() = %v, want context.DeadlineExceeded", err)
++		}
++		if d := time.Since(start); d != 50*time.Millisecond {
++			t.Errorf("withTimeout took %s, want 50ms", d)
++		}
++
++		start = time.Now()
++		if err := withCancel(); !errors.Is(err, context.Canceled) {
++			t.Errorf("withCancel() = %v, want context.Canceled", err)
++		}
++		if d := time.Since(start); d != 10*time.Millisecond {
++			t.Errorf("withCancel took %s, want 10ms", d)
++		}
++	})
++}

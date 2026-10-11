@@ -1,0 +1,203 @@
+diff --git a/cmd/upwatch/main.go b/cmd/upwatch/main.go
+index 2e4b09c..6fcf11d 100644
+--- a/cmd/upwatch/main.go
++++ b/cmd/upwatch/main.go
+@@ -63,9 +63,10 @@ func run() error {
+ 	checker := check.New(check.NewClient(cfg.AllowPrivate), cfg.CheckTimeout)
+ 	sched := scheduler.New(store, checker, logger, cfg.Workers, cfg.Tick)
+ 
++	// ctx.Done() tells the API that shutdown has begun, see below.
+ 	srv := &http.Server{
+ 		Addr:    cfg.Addr,
+-		Handler: httpapi.New(store, logger),
++		Handler: httpapi.New(store, logger, ctx.Done()),
+ 		// Without timeouts a slow or malicious client can hold a
+ 		// connection (and a goroutine) open forever.
+ 		ReadHeaderTimeout: 5 * time.Second,
+@@ -98,9 +99,18 @@ func run() error {
+ 		wg.Wait()
+ 		return fmt.Errorf("http server: %w", err)
+ 	case <-ctx.Done():
+-		logger.Info("shutting down")
++		// Restore the default signal behavior: a second Ctrl+C or
++		// SIGTERM during the delay ends the process immediately.
++		stop()
++		logger.Info("shutting down", "delay", cfg.ShutdownDelay)
+ 	}
+ 
++	// Readiness drain: /readyz already answers 503 because ctx is done,
++	// but the listener stays open. Give load balancers time to notice
++	// before Shutdown closes it. The platform's stop timeout must cover
++	// this delay plus the 15 seconds below.
++	time.Sleep(cfg.ShutdownDelay)
++
+ 	// Graceful shutdown: stop accepting connections and give in-flight
+ 	// requests up to 15 seconds to finish. The scheduler sees the same
+ 	// canceled ctx and drains its workers in parallel.
+diff --git a/internal/config/config.go b/internal/config/config.go
+index da0f121..a27949c 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -24,6 +24,10 @@ type Config struct {
+ 	LogLevel     slog.Level    // UPWATCH_LOG_LEVEL (debug, info, warn, error)
+ 	LogJSON      bool          // UPWATCH_LOG_JSON
+ 	AllowPrivate bool          // UPWATCH_ALLOW_PRIVATE_TARGETS, for local testing only
++	// ShutdownDelay is how long /readyz answers 503 after SIGTERM before
++	// the server stops accepting connections (UPWATCH_SHUTDOWN_DELAY).
++	// Zero, the default, shuts down at once.
++	ShutdownDelay time.Duration
+ }
+ 
+ // Load reads the configuration via getenv, typically os.Getenv.
+@@ -73,6 +77,16 @@ func Load(getenv func(string) string) (Config, error) {
+ 	dur("UPWATCH_TICK", &cfg.Tick)
+ 	dur("UPWATCH_CHECK_TIMEOUT", &cfg.CheckTimeout)
+ 
++	// dur rejects zero, but zero is the natural "no delay" here.
++	if v := getenv("UPWATCH_SHUTDOWN_DELAY"); v != "" {
++		d, err := time.ParseDuration(v)
++		if err != nil || d < 0 {
++			errs = append(errs, fmt.Errorf("UPWATCH_SHUTDOWN_DELAY: want a duration like 5s or 0s, got %q", v))
++		} else {
++			cfg.ShutdownDelay = d
++		}
++	}
++
+ 	if v := getenv("UPWATCH_LOG_LEVEL"); v != "" {
+ 		if err := cfg.LogLevel.UnmarshalText([]byte(v)); err != nil {
+ 			errs = append(errs, fmt.Errorf("UPWATCH_LOG_LEVEL: %w", err))
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 22b3c52..3122cdc 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -53,3 +53,26 @@ func TestLoadReportsAllErrors(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestShutdownDelay(t *testing.T) {
++	for _, tt := range []struct {
++		value   string
++		want    time.Duration
++		wantErr bool
++	}{
++		{"", 0, false},
++		{"0s", 0, false},
++		{"5s", 5 * time.Second, false},
++		{"-1s", 0, true},
++		{"soon", 0, true},
++	} {
++		cfg, err := Load(env(map[string]string{"UPWATCH_SHUTDOWN_DELAY": tt.value}))
++		if (err != nil) != tt.wantErr {
++			t.Errorf("%q: err = %v, wantErr %v", tt.value, err, tt.wantErr)
++			continue
++		}
++		if !tt.wantErr && cfg.ShutdownDelay != tt.want {
++			t.Errorf("%q: ShutdownDelay = %s, want %s", tt.value, cfg.ShutdownDelay, tt.want)
++		}
++	}
++}
+diff --git a/internal/httpapi/httpapi.go b/internal/httpapi/httpapi.go
+index 7fbcc99..87a17ea 100644
+--- a/internal/httpapi/httpapi.go
++++ b/internal/httpapi/httpapi.go
+@@ -30,13 +30,17 @@ const maxBodyBytes = 16 << 10
+ 
+ // API holds the dependencies of all handlers.
+ type API struct {
+-	store  Store
+-	logger *slog.Logger
++	store    Store
++	logger   *slog.Logger
++	draining <-chan struct{}
+ }
+ 
+ // New returns the complete HTTP handler including middleware.
+-func New(store Store, logger *slog.Logger) http.Handler {
+-	a := &API{store: store, logger: logger}
++// Once draining is closed, /readyz reports 503 so that load balancers
++// stop sending traffic; all other routes keep working. A nil channel
++// is never closed.
++func New(store Store, logger *slog.Logger, draining <-chan struct{}) http.Handler {
++	a := &API{store: store, logger: logger, draining: draining}
+ 
+ 	mux := http.NewServeMux()
+ 	mux.HandleFunc("GET /targets", a.listTargets)
+@@ -193,6 +197,12 @@ func (a *API) healthz(w http.ResponseWriter, r *http.Request) {
+ 
+ // readyz answers "can this instance serve traffic?" and checks the database.
+ func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
++	select {
++	case <-a.draining:
++		writeError(w, http.StatusServiceUnavailable, "shutting down")
++		return
++	default:
++	}
+ 	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+ 	defer cancel()
+ 	if err := a.store.Ping(ctx); err != nil {
+diff --git a/internal/httpapi/httpapi_test.go b/internal/httpapi/httpapi_test.go
+index 9ba0c28..547f70e 100644
+--- a/internal/httpapi/httpapi_test.go
++++ b/internal/httpapi/httpapi_test.go
+@@ -27,7 +27,7 @@ func newServer(t *testing.T) *httptest.Server {
+ 	t.Cleanup(func() { store.Close() })
+ 
+ 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+-	srv := httptest.NewServer(New(store, logger))
++	srv := httptest.NewServer(New(store, logger, nil))
+ 	t.Cleanup(srv.Close)
+ 	return srv
+ }
+@@ -118,7 +118,7 @@ func (failingStore) Targets(context.Context) ([]monitor.Target, error) {
+ 
+ func TestInternalErrorsAreNotLeaked(t *testing.T) {
+ 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+-	srv := httptest.NewServer(New(failingStore{}, logger))
++	srv := httptest.NewServer(New(failingStore{}, logger, nil))
+ 	defer srv.Close()
+ 
+ 	resp, body := do(t, "GET", srv.URL+"/targets", "")
+@@ -133,7 +133,7 @@ func TestInternalErrorsAreNotLeaked(t *testing.T) {
+ func TestPanicBecomes500(t *testing.T) {
+ 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+ 	// The embedded nil Store panics on any call that is not overridden.
+-	srv := httptest.NewServer(New(failingStore{}, logger))
++	srv := httptest.NewServer(New(failingStore{}, logger, nil))
+ 	defer srv.Close()
+ 
+ 	resp, _ := do(t, "GET", srv.URL+"/targets/1", "")
+@@ -141,3 +141,33 @@ func TestPanicBecomes500(t *testing.T) {
+ 		t.Fatalf("status = %d, want 500", resp.StatusCode)
+ 	}
+ }
++
++func TestReadyzWhileDraining(t *testing.T) {
++	store, err := sqlitestore.Open(t.Context(), filepath.Join(t.TempDir(), "api.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { store.Close() })
++	draining := make(chan struct{})
++	srv := httptest.NewServer(New(store, slog.New(slog.NewTextHandler(io.Discard, nil)), draining))
++	t.Cleanup(srv.Close)
++
++	if resp, body := do(t, "GET", srv.URL+"/readyz", ""); resp.StatusCode != http.StatusOK {
++		t.Fatalf("before drain: /readyz = %d %s, want 200", resp.StatusCode, body)
++	}
++
++	close(draining)
++
++	for _, tt := range []struct {
++		path string
++		want int
++	}{
++		{"/readyz", http.StatusServiceUnavailable},
++		{"/healthz", http.StatusOK}, // still alive: no restart wanted
++		{"/targets", http.StatusOK}, // requests in the drain window are served
++	} {
++		if resp, body := do(t, "GET", srv.URL+tt.path, ""); resp.StatusCode != tt.want {
++			t.Errorf("draining: %s = %d %s, want %d", tt.path, resp.StatusCode, body, tt.want)
++		}
++	}
++}
