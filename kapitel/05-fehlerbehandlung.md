@@ -379,6 +379,8 @@ go test ./beispiele/05-fehlerbehandlung/...
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/05-fehlerbehandlung.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Ersetze in `Describe` in [fehler/main.go](../beispiele/05-fehlerbehandlung/fehler/main.go) das `%w` durch `%v` und führe `go test ./beispiele/05-fehlerbehandlung/...` aus. Welcher Test schlägt fehl und warum? Mach die Änderung danach rückgängig.
 2. **Aufwärmen:** Ersetze in `handleError` das `errors.As` durch `errors.AsType`. Laufen die Tests in `internal/httpapi` weiterhin durch?
 3. **Kern:** Ändere in `sqlitestore.Store.Target` das Wrapping so, dass zusätzlich `sql.ErrNoRows` mit `%w` eingepackt wird (Tipp: `fmt.Errorf` akzeptiert seit Go 1.20 mehrere `%w`). Welcher Code außerhalb des Stores könnte sich jetzt darauf verlassen, und warum ist das unerwünscht?

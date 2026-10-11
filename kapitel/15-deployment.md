@@ -401,6 +401,8 @@ Wer horizontal skalieren will, braucht eine Datenbank, die mehrere Prozesse übe
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/15-deployment.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Baue upwatch einmal mit und einmal ohne `-ldflags="-s -w"` und vergleiche die Größen. Prüfe mit `go version -m`, welche Build-Informationen in beiden Fällen enthalten sind. Lege einen Git-Tag an und schau, was `make build` jetzt als Version einträgt.
 2. **Kern:** Lies die Version zur Laufzeit zusätzlich aus `debug.ReadBuildInfo()` und gib `vcs.revision` beim Start im Log aus. Wann ist der Wert leer?
 3. **Kern:** Starte den Container mit einem Named Volume (`docker run -v upwatch-data:/data -p 8080:8080 upwatch:dev`), lege ein Ziel an, stoppe und starte den Container neu und prüfe, dass das Ziel noch da ist.

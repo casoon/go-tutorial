@@ -474,6 +474,8 @@ Zum Vergleich: In C# hat eine Klasse ohne Konstruktor-Aufruf gar keinen Wert, so
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/04-go-denkweise.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Baue `countingStore` aus [embedding/main.go](../beispiele/04-go-denkweise/embedding/main.go) so um, dass er `Store` nicht einbettet, sondern als benanntes Feld `inner Store` hält. Welche Methode fehlt jetzt, und an welcher Stelle meldet der Compiler das? Ergänze sie, passe in [main_test.go](../beispiele/04-go-denkweise/embedding/main_test.go) den Feldnamen an, und `go test ./beispiele/04-go-denkweise/embedding` muss wieder grün sein.
 2. **Kern:** Schreib in [interfaces/main.go](../beispiele/04-go-denkweise/interfaces/main.go) eine Funktion `WithFallback(primary, fallback Checker) Checker` nach dem Muster von `WithRetry`. Sie fragt zuerst `primary`; nur wenn der 0 (nicht erreichbar) oder einen Status ab 500 meldet, fragt sie `fallback` und gibt dessen Antwort zurück. Ein passender Test liegt schon bereit, ist aber hinter dem Build-Tag `uebung` versteckt, damit das Repository ohne deine Lösung kompiliert: `go test -tags uebung ./beispiele/04-go-denkweise/interfaces` schlägt mit „undefined: WithFallback“ fehl, bis die Funktion existiert, und prüft dann vier Fälle – auch, dass `fallback` bei einer guten Antwort gar nicht aufgerufen wird.
 3. **Kern:** Ergänze im selben Beispiel einen dritten Konsumenten: `WriteCSV(w io.Writer, store csvStore) error`, der pro Ergebnis eine Zeile `url,status` schreibt. Definiere `csvStore` mit genau den Methoden, die du brauchst, und rufe `WriteCSV` in `run` auf. Musstest du `MemStore` dafür ändern?

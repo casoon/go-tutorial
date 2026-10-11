@@ -105,7 +105,12 @@ func (a *API) createTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, err := monitor.NewTarget(req.URL, time.Duration(req.IntervalSeconds)*time.Second)
+	interval, err := secondsToDuration(req.IntervalSeconds)
+	if err != nil {
+		a.handleError(w, r, err)
+		return
+	}
+	target, err := monitor.NewTarget(req.URL, interval)
 	if err != nil {
 		a.handleError(w, r, err)
 		return
@@ -224,6 +229,20 @@ func (a *API) handleError(w http.ResponseWriter, r *http.Request, err error) {
 func (a *API) serverError(w http.ResponseWriter, r *http.Request, err error) {
 	a.logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 	writeError(w, http.StatusInternalServerError, "internal server error")
+}
+
+// secondsToDuration converts without overflow. time.Duration counts
+// nanoseconds in an int64, so a huge number of seconds would wrap around to
+// a small, valid-looking interval. The upper bound is checked here, before
+// multiplying; NewTarget checks the rest.
+func secondsToDuration(s int64) (time.Duration, error) {
+	if s < 0 || s > int64(monitor.MaxInterval/time.Second) {
+		return 0, &monitor.ValidationError{
+			Field:  "interval",
+			Reason: fmt.Sprintf("must be between %s and %s", monitor.MinInterval, monitor.MaxInterval),
+		}
+	}
+	return time.Duration(s) * time.Second, nil
 }
 
 func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {

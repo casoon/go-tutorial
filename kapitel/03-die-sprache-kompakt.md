@@ -436,6 +436,8 @@ Eine Falle: `defer` in einer Schleife läuft erst am Ende der Funktion, nicht am
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/03-die-sprache-kompakt.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Schreib eine Funktion `Uptime(results []monitor.Result) float64`, die den Anteil erfolgreicher Prüfungen berechnet, und nutze `Result.Up()`. Was gibst du für einen leeren Slice zurück, und brauchst du Generics?
 2. **Kern:** Ergänze in [grundlagen/main.go](../beispiele/03-die-sprache-kompakt/grundlagen/main.go) einen Status `StatusDegraded` für Antworten, die zwar erfolgreich, aber langsamer als 2 Sekunden sind. Wo musst du überall etwas ändern (denk an `String` und an die Schleife in `main`), und welchen Testfall ergänzt du in `TestResultStatus`?
 3. **Kern:** Die Closure `num` aus `config.Load` (oben gezeigt) schreibt über `*dst = n` in die Config. Schreib eine Variante, die stattdessen den Wert zurückgibt (`func(key string, def int) int`), und rufe sie für `UPWATCH_WORKERS` auf. Was wird an der Aufrufstelle länger, und wie kommt der Default jetzt hinein?

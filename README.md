@@ -27,7 +27,7 @@ Nutzer legen URLs an. upwatch prüft sie regelmäßig parallel und speichert Sta
 
 ## So arbeitest du mit diesem Tutorial
 
-Der Code von upwatch liegt fertig und getestet im Repository. Du schreibst ihn nicht Zeile für Zeile ab, sondern startest ihn in Teil 1 und lernst ihn danach Baustein für Baustein kennen: Die Teile 1–7 legen die Grundlagen an Beispielen aus upwatch, ab Teil 8 geht es Paket für Paket durch den echten Code. Jedes Kapitel hat einen kurzen „Jetzt du“-Moment zum Ausprobieren und Übungen in drei Stufen (Aufwärmen, Kern, Profi), in denen du upwatch veränderst und erweiterst. Zu fast jedem Kapitel gibt es lauffähige Beispiele unter [`beispiele/`](beispiele/).
+Der Code von upwatch liegt fertig und getestet im Repository. Du schreibst ihn nicht Zeile für Zeile ab, sondern startest ihn in Teil 1 und lernst ihn danach Baustein für Baustein kennen: Die Teile 1–7 legen die Grundlagen an Beispielen aus upwatch, ab Teil 8 geht es Paket für Paket durch den echten Code. Jedes Kapitel hat einen kurzen „Jetzt du“-Moment zum Ausprobieren und Übungen in drei Stufen (Aufwärmen, Kern, Profi), in denen du upwatch veränderst und erweiterst. Zu fast jedem Kapitel gibt es lauffähige Beispiele unter [`beispiele/`](beispiele/). Musterlösungen zu allen Übungen – mit Begründung und als prüfbare Patches – liegen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/tree/loesungen/loesungen).
 
 ## Inhalt
 

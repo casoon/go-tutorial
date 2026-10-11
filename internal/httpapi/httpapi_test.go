@@ -81,6 +81,7 @@ func TestTargetsAPI(t *testing.T) {
 		{"get unknown", "GET", "/targets/99", "", 404, "not found"},
 		{"get bad id", "GET", "/targets/abc", "", 400, "positive integer"},
 		{"duplicate", "POST", "/targets", `{"url":"https://example.com"}`, 409, "already exists"},
+		{"interval overflow", "POST", "/targets", `{"url":"https://b.de","interval_seconds":18446744084}`, 400, "interval"},
 		{"invalid url", "POST", "/targets", `{"url":"ftp://x"}`, 400, "scheme"},
 		{"unknown field", "POST", "/targets", `{"url":"https://a.de","admin":true}`, 400, "unknown field"},
 		{"broken json", "POST", "/targets", `{"url":`, 400, "invalid JSON"},

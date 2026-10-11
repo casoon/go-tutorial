@@ -337,6 +337,8 @@ Setze `sync.Pool` nur ein, wenn ein Profil zeigt, dass die Allokationen genau di
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/14-performance.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Führe `go build -gcflags=-m ./internal/httpapi` aus und suche die Zeilen zu `out` in `listTargets`. Landet der Slice auf dem Heap? Warum? Probiere `-gcflags='-m -m'` für die ausführliche Begründung.
 2. **Profi:** `Store.Results` baut seinen Slice ohne Kapazität auf, obwohl `limit` bekannt ist. Schreib einen Benchmark gegen eine echte SQLite-Datenbank im Temp-Verzeichnis (`t.TempDir()` gibt es auch als `b.TempDir()`), der 1000 Ergebnisse liest, ändere die Zeile auf `make([]monitor.Result, 0, limit)` und vergleiche mit `benchstat`. Lohnt sich das, wenn die meisten Abfragen nur 50 Zeilen liefern?
 3. **Kern:** Starte upwatch mit Debug-Listener (`UPWATCH_DEBUG_ADDR=127.0.0.1:6060 go run ./cmd/upwatch`), lege in einem zweiten Terminal einige Ziele an und hole das Goroutine-Profil mit `go tool pprof -top http://127.0.0.1:6060/debug/pprof/goroutine`. Findest du die Worker des Schedulers wieder? Wie viele sind es, und passt das zu `UPWATCH_WORKERS`?

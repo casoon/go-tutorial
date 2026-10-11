@@ -216,7 +216,12 @@ func (a *API) createTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, err := monitor.NewTarget(req.URL, time.Duration(req.IntervalSeconds)*time.Second)
+	interval, err := secondsToDuration(req.IntervalSeconds)
+	if err != nil {
+		a.handleError(w, r, err)
+		return
+	}
+	target, err := monitor.NewTarget(req.URL, interval)
 	if err != nil {
 		a.handleError(w, r, err)
 		return
@@ -231,6 +236,8 @@ func (a *API) createTarget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toTargetJSON(created))
 }
 ```
+
+`secondsToDuration` gab es in der ersten Fassung nicht; dort stand `time.Duration(req.IntervalSeconds)*time.Second` direkt im Aufruf. Beim Schreiben der Musterlösungen fiel auf, dass das überlaufen kann: `time.Duration` zählt Nanosekunden in einem `int64`, und `{"interval_seconds":18446744084}` ergab nach der Multiplikation genau 10 Sekunden – ein gültiges Intervall. `NewTarget` sieht nur das Ergebnis und kann den Überlauf nicht mehr erkennen. Deshalb prüft `secondsToDuration` die Obergrenze, bevor es multipliziert. Allgemein gilt: Eingaben im Wertebereich des Eingabetyps prüfen, nicht erst nach einer Umrechnung.
 
 Der Ablauf ist der Kern jeder schreibenden API: Eingabe dekodieren, in ein gültiges Domänenobjekt überführen (`monitor.NewTarget` validiert und normalisiert die URL), speichern, antworten. Die Validierung liegt im Domänenpaket, nicht im Handler – derselbe Code gilt damit auch, wenn Ziele später über ein CLI oder einen Import angelegt werden. `201 Created` mit `Location` ist die HTTP-Konvention für „neue Ressource unter dieser URL“. Fehler aus `NewTarget` und `CreateTarget` laufen beide durch `handleError`, das aus Teil 05 bekannt ist: `ValidationError` wird `400`, `ErrDuplicate` wird `409`, alles andere `500` ohne interne Details.
 
@@ -454,6 +461,8 @@ Eine pragmatische Reihenfolge: mit `net/http` anfangen, chi einführen, wenn Rou
 - [check.go](../internal/check/check.go): `http.Client` mit eigenem Transport, `NewRequestWithContext`, Body schließen und begrenzt auslesen.
 
 ## Übungen
+
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/08-http-api.md) – versuch es zuerst selbst.
 
 1. **Aufwärmen:** Hänge in der In-Memory-Vorstufe eine eigene Middleware ein, die jeder Antwort den Header `X-Upwatch-Example: 1` mitgibt, und prüfe mit `curl -i`, dass er auch bei `404` und `405` des Mux ankommt. Was ändert sich, wenn du sie stattdessen nur um einen einzelnen Handler legst?
 2. **Kern:** `readJSON` prüft den `Content-Type` nicht; `curl -d` schickt standardmäßig `application/x-www-form-urlencoded`, und die API akzeptiert das trotzdem. Lass `createTarget` bei einem anderen Typ als `application/json` mit `415 Unsupported Media Type` antworten (Tipp: `mime.ParseMediaType`) und ergänze einen Fall in `httpapi_test.go`.

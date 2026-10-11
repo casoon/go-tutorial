@@ -326,6 +326,8 @@ In einer Schleife, die rechnet statt wartet, prüfst du in sinnvollen Abständen
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/07-context.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Schreibe ein kleines Programm, das `context.WithTimeout(context.Background(), 50*time.Millisecond)` erzeugt, in einem `select` zwischen `<-ctx.Done()` und `time.After(time.Second)` wartet und danach `ctx.Err()` ausgibt. Ersetze dann `WithTimeout` durch `WithCancel` und rufe `cancel()` nach 10 ms aus einer Goroutine auf. Welche zwei Fehlerwerte siehst du?
 2. **Kern:** `Check` behandelt jedes `DeadlineExceeded` als langsame Seite. Was passiert, wenn der Aufrufer selbst eine Deadline setzt, die vor `c.timeout` abläuft? Schreibe einen Test mit `httptest.Server`, der das zeigt, und überlege, wie man den Fall mit `ctx.Deadline()` oder `WithTimeoutCause` unterscheiden könnte.
 3. **Kern:** Ersetze in `main.go` `signal.NotifyContext` testweise durch `context.WithCancelCause` und einen eigenen `signal.Notify`-Channel, der beim Signal `cancel(fmt.Errorf("received %v", sig))` aufruft. Logge beim Shutdown `context.Cause(ctx)` und probiere es mit dem Aufbau aus „Jetzt du“ aus.

@@ -132,11 +132,13 @@ Trotzdem ruft `main` einmal `slog.SetDefault(logger)` auf. Das betrifft die Top-
 Ein Typ, der `slog.LogValuer` implementiert, bestimmt selbst, wie er geloggt wird. Das ist die richtige Stelle, um Geheimnisse zu schützen – einmal am Typ, statt an jeder Log-Stelle daran denken zu müssen:
 
 ```go
-// Secret never shows up in logs, whatever handler is used.
+// Secret is redacted whenever it is logged as an attribute.
 type Secret string
 
 func (Secret) LogValue() slog.Value { return slog.StringValue("[redacted]") }
 ```
+
+Das wirkt, wenn der Wert selbst ein Attribut ist: `logger.Info("config", "token", cfg.Token)`. Steckt er dagegen in einem Struct, das als Ganzes geloggt wird (`"config", cfg`), fragt slog `LogValue` der Felder nicht ab – der JSON-Handler kodiert das Struct mit `encoding/json`, und der Token steht im Klartext im Log. Wer sichergehen will, gibt `Secret` zusätzlich `MarshalText` und `String`, die ebenfalls `[redacted]` liefern, oder loggt Structs mit Geheimnissen gar nicht als Ganzes.
 
 Dasselbe Interface eignet sich, um große Structs kompakt zu loggen: `Target.LogValue` im Beispiel [beispiele/12-logging-konfiguration-observability/slog](../beispiele/12-logging-konfiguration-observability/slog/main.go) gibt nur `id` und `url` als Gruppe zurück und lässt das Token-Feld weg. Das Beispiel zeigt alle Bausteine dieses Abschnitts. Es entfernt den Zeitstempel über `ReplaceAttr`, damit die Ausgabe reproduzierbar ist; ein echter Dienst behält ihn.
 
@@ -408,6 +410,8 @@ Die zweite Verfeinerung betrifft Umgebungen mit Load Balancer: `/readyz` schon v
 - [upwatch.service](../deploy/upwatch.service) und [Dockerfile](../Dockerfile) – JSON-Logs und Stop-Timeout im Betrieb.
 
 ## Übungen
+
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/12-logging-konfiguration-observability.md) – versuch es zuerst selbst.
 
 1. **Kern (empfohlen):** Ergänze die Request-Middleware in upwatch um eine Request-ID: Erzeuge pro Request eine zufällige ID, setze sie als Response-Header `X-Request-Id` und gib sie als Attribut `request_id` in der Logzeile aus. Wie würdest du die ID an Handler weiterreichen, die selbst loggen?
 2. **Kern:** Füge einen vierten expvar-Zähler hinzu, der zählt, wie viele Checks mit einem Timeout endeten (`r.Err == "timeout"`). Starte upwatch mit `UPWATCH_DEBUG_ADDR` und prüfe den Wert über `/debug/vars`.

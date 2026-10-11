@@ -451,6 +451,8 @@ In upwatch läuft govulncheck als Schritt in [.github/workflows/ci.yml](../.gith
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/13-security.md) – versuch es zuerst selbst.
+
 1. **Kern (empfohlen):** Schreib eine Middleware `requireToken(token string, next http.Handler) http.Handler`, die `Authorization: Bearer <token>` mit `subtle.ConstantTimeCompare` prüft und sonst 401 antwortet. Lies den Token in `config.Load` aus `UPWATCH_API_TOKEN` und gib ihm einen Typ mit `LogValue`, der ihn im Log verbirgt. `/healthz` und `/readyz` sollen ohne Token erreichbar bleiben.
 2. **Kern:** Ergänze `TestIsPublic` um weitere Adressen: `224.0.0.1` (Multicast), `198.18.0.1` (Benchmark-Netz), `240.0.0.1` (reserviert) und `64:ff9b::7f00:1` (NAT64-Abbildung von `127.0.0.1`). Welche hält `isPublic` für öffentlich? Erweitere die Funktion um eine Liste zusätzlich verbotener Präfixe.
 3. **Profi:** Begrenze die Anzahl der Ziele: `POST /targets` soll mit 409 oder 422 antworten, wenn bereits 500 Ziele existieren. Wo gehört die Grenze hin – in die Domäne, die API oder den Store? Begründe deine Wahl.

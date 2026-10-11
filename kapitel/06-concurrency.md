@@ -544,6 +544,8 @@ Die Server-Grundstruktur ist in Go ohnehin schon nebenläufig: `net/http` starte
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/06-concurrency.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Ändere in `beispiele/06-concurrency/pool/main.go` die Zahl der Worker auf 1, dann auf 12, und starte das Programm jeweils dreimal. Erkläre die Laufzeiten. Warum bringen 24 Worker bei zwölf URLs nichts mehr?
 2. **Kern:** Ersetze in `beispiele/06-concurrency/race` den Mutex in `Stats` durch zwei Felder vom Typ `atomic.Int64`, eines für Erfolge und eines für Fehler. Prüfe mit `go test -race`. Was gewinnst du, was verlierst du gegenüber der Map mit Mutex?
 3. **Kern:** Schreibe `First` aus dem Leak-Beispiel so um, dass es nach der ersten Antwort einen Channel `done chan struct{}` schließt und die anderen Goroutines über `select` zwischen ihrem Send und `<-done` aussteigen lassen – ganz ohne Puffer. Prüfe mit dem `synctest`-Test aus `leak/main_test.go` (siehe Kasten oben), dass nichts leckt.

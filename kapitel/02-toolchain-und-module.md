@@ -346,6 +346,8 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=v1.0.0" -o bin/
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/02-toolchain-und-module.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Rücke in deinem `vetdemo`-Modul eine Zeile mit Leerzeichen statt Tab ein und füge überflüssige Leerzeichen um ein Komma ein. Was meldet `gofmt -l .`, was ändert `go fmt ./...`?
 2. **Kern:** Lege außerhalb des Repositorys ein Modul `example.com/ping` an, schreibe ein Programm, das `https://example.com` mit `http.Get` abruft und den Statuscode ausgibt, und baue es mit `GOOS=linux GOARCH=arm64 go build`. Prüfe das Ergebnis mit `file` und `go version -m`.
 3. **Kern:** Führe im upwatch-Repository `go mod why -m golang.org/x/sys` und `go list -m all | wc -l` aus. Warum stehen in `go list -m all` mehr Module als in `go.mod`?

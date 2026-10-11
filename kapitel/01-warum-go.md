@@ -224,6 +224,8 @@ Zum Vergleich: Eine ASP.NET-Core-Anwendung braucht entweder ein installiertes .N
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/01-warum-go.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Starte upwatch mit `UPWATCH_TICK=1s` und lege zwei Ziele an, eines davon mit einer Domain, die es nicht gibt (`https://does-not-exist.invalid`). Vergleiche die Ergebnisse. Welche Felder unterscheiden sich, und welchen Wert hat `up`?
 2. **Aufwärmen:** Starte upwatch mit `UPWATCH_LOG_JSON=true` und vergleiche die Logausgabe. Welche Variante würdest du lokal, welche in Produktion verwenden?
 3. **Kern:** Lösche ein Ziel mit `curl -X DELETE localhost:8080/targets/1` und frage danach `/targets/1/results` ab. Welchen Statuscode bekommst du, und wo im Code wird er festgelegt? (Tipp: `handleError` in [httpapi.go](../internal/httpapi/httpapi.go).)

@@ -176,7 +176,7 @@ Wer aus ASP.NET oder Spring kommt, erwartet drei Schichten: Controller nehmen Re
 
 ```go
 // in createTarget, after decoding the request:
-target, err := monitor.NewTarget(req.URL, time.Duration(req.IntervalSeconds)*time.Second)
+target, err := monitor.NewTarget(req.URL, interval)
 // ...
 created, err := a.store.CreateTarget(r.Context(), target)
 ```
@@ -229,6 +229,8 @@ Diese Reihenfolge ist umkehrbar und billig. Das Umziehen eines Packages ist in G
 - [store.go](../internal/sqlitestore/store.go) – erfüllt beide Interfaces, ohne sie zu kennen.
 
 ## Übungen
+
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/09-projektstruktur.md) – versuch es zuerst selbst.
 
 1. **Aufwärmen:** Lege außerhalb des Repos ein Modul `example.com/other` an, das per `replace`-Direktive auf deinen Checkout von upwatch zeigt, und versuche in seinem `main.go`, `internal/monitor` zu importieren. Vergleiche die Meldung mit der im Abschnitt über `internal/`.
 2. **Kern:** Skizziere das oben beschriebene Alarm-Feature als Package `internal/alert`: Welche Interfaces würde es beim Konsumenten definieren, wer würde es aufrufen, und welche Imports bräuchte `main.go` zusätzlich? Schreib nur die Typen und Signaturen, keine Implementierung, und prüfe mit `go list` wie in „Jetzt du“, dass kein Zyklus entsteht.

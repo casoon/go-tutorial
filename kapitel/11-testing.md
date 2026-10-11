@@ -416,7 +416,7 @@ Eine Eingabe wie `http://00? #x` endet nicht auf Leerraum, `TrimSpace` lässt si
 
 Beide Fälle sind typisch für Fuzzing: Kein Mensch schreibt einen Tabellenfall mit 700 Bytes `\xa1` oder einem Leerzeichen vor einem Fragment. Die Eigenschaft „idempotent“ hat beide trotzdem gefunden.
 
-Der Fuzzer schreibt jede fehlschlagende Eingabe nach `testdata/fuzz/FuzzNormalizeURL/`. Ab dann gehört sie zum Seed-Korpus und läuft bei jedem normalen `go test` mit. Beide Dateien liegen im Repository unter [`internal/monitor/testdata/fuzz/`](../internal/monitor/testdata/fuzz/FuzzNormalizeURL/) – sie sind jetzt Regressionstests. Zusätzlich hat `TestNormalizeURL` zwei lesbare Tabellenfälle bekommen („too long after encoding“, „inner whitespace“), damit der Fehler auch ohne kryptische Korpusdatei dokumentiert ist.
+Der Fuzzer schreibt jede fehlschlagende Eingabe nach `testdata/fuzz/FuzzNormalizeURL/`. Ab dann gehört sie zum Seed-Korpus und läuft bei jedem normalen `go test` mit. Beide Dateien liegen im Repository unter [`internal/monitor/testdata/fuzz/`](../internal/monitor/testdata/fuzz/FuzzNormalizeURL/). Ein Korpus-Eintrag sichert aber nur die Eingabe, nicht den Pfad, den sie nimmt: Die erste Datei enthält auch Leerzeichen und wird seit der zweiten Korrektur schon an der Leerraum-Prüfung abgelehnt – die Längenprüfung erreicht sie nicht mehr. Deshalb hat `TestNormalizeURL` zwei lesbare Tabellenfälle bekommen („too long after encoding“, „inner whitespace“), die jeden Fehler gezielt abdecken. Korpusdateien sind ein Bonus, der eigentliche Regressionstest ist der benannte Tabellenfall.
 
 Gute Fuzz-Eigenschaften sind: Idempotenz (wie hier), Round-Trips (`Parse(Format(x)) == x`, siehe `FuzzParseInterval` im Beispiel), „stürzt nicht ab“ für Parser von Benutzereingaben, und Vergleich mit einer einfachen, langsamen Referenzimplementierung.
 
@@ -458,6 +458,8 @@ total:								(statements)	84.6%
 - [Makefile](../Makefile) – `make test` und `make check` laufen mit `-race`.
 
 ## Übungen
+
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/11-testing.md) – versuch es zuerst selbst.
 
 1. **Aufwärmen:** Ergänze `TestNormalizeURL` um zwei eigene Tabellenfälle, etwa eine URL mit Port und eine mit Query-String. Lass zuerst einen absichtlich falschen `want`-Wert stehen und prüfe, ob die Meldung ohne Blick in den Testcode verständlich ist.
 2. **Kern:** Mach die Korrektur der Längenprüfung in `NormalizeURL` testweise rückgängig und starte `go test ./internal/monitor` – ohne `-fuzz`. Welcher Test schlägt fehl, und warum findet ihn ein normaler Testlauf? Schreib danach eine zweite Fuzz-Eigenschaft, etwa „das Ergebnis ist nie länger als `MaxURLLength`“, und lass den Fuzzer eine Minute laufen.

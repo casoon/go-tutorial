@@ -180,6 +180,8 @@ Die offiziellen Quellen sind gut und reichen weit:
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/16-best-practices.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Such dir ein Go-Projekt, das du selbst geschrieben hast oder bei der Arbeit pflegst, und geh es mit der Tabelle am Anfang dieses Kapitels durch. Notiere für jeden Fund, welches Muster aus welcher Sprache dahintersteckt.
 2. **Kern:** Schreib `httpapi` testweise auf ein großes `StoreInterface` beim Anbieter um, das alle Methoden von `sqlitestore.Store` enthält. Was ändert sich an den Tests in `httpapi_test.go`, insbesondere an `failingStore`? Mach die Änderung danach rückgängig.
 3. **Profi (empfohlen):** Wähl eine der Erweiterungen aus „Wie es weitergehen kann“ und setz sie um, inklusive Tests. Achte darauf, ob du ein neues Interface, ein neues Package oder eine neue Abhängigkeit brauchst – und begründe jede davon.

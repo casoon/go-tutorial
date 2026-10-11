@@ -463,6 +463,8 @@ Eine pragmatische Reihenfolge: Fang mit `database/sql` an, wie upwatch. Wenn die
 
 ## Übungen
 
+Musterlösungen mit Begründung stehen im Branch [`loesungen`](https://github.com/casoon/go-tutorial/blob/loesungen/loesungen/10-datenbanken.md) – versuch es zuerst selbst.
+
 1. **Aufwärmen:** Lass `sqlite3 "$UPWATCH_DB" .schema` laufen und finde im Schema den Index, den `ClaimDue` für `WHERE next_check_at <= ?` nutzt. Lösche dann per `curl -X DELETE` ein Ziel mit Ergebnissen und prüfe mit `SELECT COUNT(*) FROM results`, dass `ON DELETE CASCADE` gegriffen hat.
 2. **Kern:** Füge im Beispiel in `addWithResult` direkt nach `LastInsertId` eine Abfrage über `db` statt über `tx` ein, etwa `db.QueryRowContext(ctx, "SELECT COUNT(*) FROM targets").Scan(&n)`. Führe das Programm einmal so aus und einmal zusätzlich ohne `db.SetMaxOpenConns(1)`. Erkläre beide Ergebnisse – das eine hängt, bis der Context nach zehn Sekunden abläuft, das andere meldet „no such table“.
 3. **Kern:** Schreib für upwatch eine Methode `(*Store).UpdateInterval(ctx, id int64, interval time.Duration) error`, die `monitor.ErrNotFound` zurückgibt, wenn es das Ziel nicht gibt, und ergänze einen Test in `store_test.go`. Füge danach eine zweite Migration `002_target_name.sql` hinzu, die eine Spalte `name TEXT NOT NULL DEFAULT ''` anlegt, und prüfe mit `TestMigrateIsIdempotent`, dass ein zweiter Start sie nicht erneut ausführt.
