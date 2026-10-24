@@ -11,6 +11,7 @@ export default defineConfig({
       name: 'go-tutorial',
       description:
         'Go für echte Projekte: ein durchgehendes Tutorial, das Schritt für Schritt einen produktionsnahen URL-Monitor baut.',
+      tagline: 'Go lernen an einem echten Projekt',
       repo: 'casoon/go-tutorial',
       license: 'MIT',
       lang: 'de',
