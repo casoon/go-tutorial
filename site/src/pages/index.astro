@@ -1,21 +1,33 @@
 ---
+import { readFile } from 'node:fs/promises';
 import {
   Badge,
   Badges,
   CodeBlock,
   Facts,
+  Faq,
   Features,
   Hero,
   Quickstart,
+  ReleaseHighlights,
   Terminal,
 } from '@casoon/pages-theme/components';
 import Base from '@casoon/pages-theme/layouts/Base.astro';
 import Curriculum from '../components/Curriculum.astro';
 import { url } from '@casoon/pages-theme/url';
+import config from 'virtual:casoon-pages/config';
+import { parseChangelog } from '@casoon/pages-theme/lib/changelog';
 // Recorded with scripts/hero-session.sh against the real service.
 import session from '../hero-session.ansi?raw';
 
 const chapters = Object.keys(import.meta.glob('../../../kapitel/*.md')).length;
+
+// Skip "Unreleased": it has no version to show as "New in v…" yet.
+const latestRelease = config.changelog
+  ? parseChangelog(await readFile(config.changelog, 'utf8')).find(
+      (r) => r.version.toLowerCase() !== 'unreleased'
+    )
+  : undefined;
 
 const quickstart = `git clone https://github.com/casoon/go-tutorial
 cd go-tutorial
@@ -83,4 +95,31 @@ curl -s :8080/targets/1/results`;
   >
     <CodeBlock code={quickstart} lang="bash" title="Terminal" label="Shell" />
   </Quickstart>
+
+  {latestRelease && <ReleaseHighlights release={latestRelease} />}
+
+  <Faq
+    items={[
+      {
+        q: 'Muss ich den Code von upwatch selbst abschreiben?',
+        a: 'Nein. Der fertige, getestete Code liegt im Repository – du startest ihn in Teil 1 und lernst ihn danach Baustein für Baustein kennen, während du ihn in den Übungen selbst veränderst.',
+      },
+      {
+        q: 'Für wen ist dieses Tutorial gedacht?',
+        a: 'Für Entwickler, die aus C#, Java oder TypeScript kommen. Es erklärt nicht nur Syntax, sondern auch, wo Go bewusst andere Muster nutzt als diese Sprachen.',
+      },
+      {
+        q: 'Welche Go-Version brauche ich?',
+        a: 'Go 1.26 oder neuer. Weitere Voraussetzungen gibt es kaum, da upwatch außer dem SQLite-Treiber ohne zusätzliche Abhängigkeiten auskommt.',
+      },
+      {
+        q: 'Was genau ist upwatch?',
+        a: 'Ein kleiner, produktionsnaher URL-Monitor: Nutzer legen URLs an, upwatch prüft sie parallel im Intervall und speichert Statuscode, Antwortzeit und Zeitpunkt in SQLite.',
+      },
+      {
+        q: 'Wo finde ich Musterlösungen zu den Übungen?',
+        a: 'Im Branch loesungen liegen Lösungen zu allen Übungen mit Begründung und als prüfbare Patches.',
+      },
+    ]}
+  />
 </Base>
