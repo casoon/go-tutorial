@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import {
   Badge,
   Badges,
+  CallToAction,
   CodeBlock,
   Facts,
   Faq,
@@ -121,5 +122,11 @@ curl -s :8080/targets/1/results`;
         a: 'Im Branch loesungen liegen Lösungen zu allen Übungen mit Begründung und als prüfbare Patches.',
       },
     ]}
+  />
+
+  <CallToAction
+    title="upwatch Schritt für Schritt verstehen."
+    href={url('docs/')}
+    label="Mit Teil 1 beginnen"
   />
 </Base>
